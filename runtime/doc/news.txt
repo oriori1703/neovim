@@ -350,6 +350,7 @@ LSP
   `commitCharacters` had no effect.
 • The `reuse_client` predicate now passes the target buffer. See |vim.lsp.Config| and
   |vim.lsp.start()|
+• |vim.lsp.inlay_hint.apply_text_edits()| to insert `textEdits` from |lsp-inlay_hint|.
 
 LUA
 
