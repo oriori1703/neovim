@@ -561,18 +561,15 @@ local function get_hint_labels(hint, needed_fields)
   local hint_labels = {}
 
   if type(hint.label) == 'table' and #hint.label > 0 then
-    vim.iter(hint.label):each(
-      --- @param label lsp.InlayHintLabelPart
-      function(label)
-        if
-          vim.iter(needed_fields):any(function(field_name)
-            return label[field_name] ~= nil
-          end)
-        then
-          add_new_label(hint_labels, { hint = hint, label = label }, needed_fields)
-        end
+    for _, label in ipairs(hint.label) do
+      if
+        vim.iter(needed_fields):any(function(field_name)
+          return label[field_name] ~= nil
+        end)
+      then
+        add_new_label(hint_labels, { hint = hint, label = label }, needed_fields)
       end
-    )
+    end
   end
 
   if #hint_labels > 0 then
@@ -621,17 +618,12 @@ local action_handlers = {
     --- @type vim.lsp.inlay_hint.action.hint_label[]
     local hint_labels = {}
 
-    vim.iter(hints):each(
-      --- @param item lsp.InlayHint
-      function(item)
-        if type(item.label) == 'table' and #item.label > 0 then
-          local labels_from_this = get_hint_labels(item, { 'location' })
-          if labels_from_this then
-            vim.list_extend(hint_labels, labels_from_this)
-          end
-        end
+    for _, item in ipairs(hints) do
+      local labels_from_this = get_hint_labels(item, { 'location' })
+      if labels_from_this then
+        vim.list_extend(hint_labels, labels_from_this)
       end
-    )
+    end
 
     if vim.tbl_isempty(hint_labels) then
       return false
@@ -771,37 +763,29 @@ local action_handlers = {
       util.convert_input_to_markdown_lines(hint.tooltip, lines)
     end
 
-    if hint_labels then
-      vim.iter(hint_labels):each(
-        --- @param hint_label vim.lsp.inlay_hint.action.hint_label
-        function(hint_label)
-          local label = hint_label.label
-          lines[#lines + 1] = ''
-          -- each of the level 2 headings is the text of a label part
-          lines[#lines + 1] = string.format('## `%s`', label.value)
-          lines[#lines + 1] = ''
-          if label.tooltip then
-            -- borrowed from `vim.lsp.buf.hover()`
-            util.convert_input_to_markdown_lines(label.tooltip, lines)
-          end
-          if label.location then
-            -- include the location in this label part
-            lines[#lines + 1] = string.format(
-              '_Location_: `%s`:%d',
-              cleanup_path(vim.uri_to_fname(label.location.uri), ctx.client.root_dir),
-              label.location.range.start.line
-            )
-          end
-          if label.command then
-            -- include the command associated to this label part
-            local command_line = string.format('_Command_: %s', label.command.title)
-            if label.command.tooltip then
-              command_line = command_line .. string.format(' (%s)', label.command.tooltip)
-            end
-            lines[#lines + 1] = command_line
-          end
+    for _, hint_label in ipairs(hint_labels or {}) do
+      local label = hint_label.label
+      lines[#lines + 1] = ''
+      -- Each of the level 2 headings is the text of a label part.
+      lines[#lines + 1] = string.format('## `%s`', label.value)
+      lines[#lines + 1] = ''
+      if label.tooltip then
+        util.convert_input_to_markdown_lines(label.tooltip, lines)
+      end
+      if label.location then
+        lines[#lines + 1] = string.format(
+          '_Location_: `%s`:%d',
+          cleanup_path(vim.uri_to_fname(label.location.uri), ctx.client.root_dir),
+          label.location.range.start.line
+        )
+      end
+      if label.command then
+        local command_line = string.format('_Command_: %s', label.command.title)
+        if label.command.tooltip then
+          command_line = command_line .. string.format(' (%s)', label.command.tooltip)
         end
-      )
+        lines[#lines + 1] = command_line
+      end
     end
 
     if #lines == 2 then
