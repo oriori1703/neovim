@@ -382,6 +382,8 @@ LSP
   option is omitted.
 • Support for `workspace/foldingRange/refresh`:
   https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_foldingRange_refresh
+• |vim.lsp.inlay_hint.action()| to apply actions from certain fields of
+  |lsp-inlay_hint|.
 
 LUA
 
