@@ -3,6 +3,8 @@ local fn = vim.fn
 local log = require('vim.lsp.log')
 local nvim_on = require('vim._core.util').nvim_on
 local util = require('vim.lsp.util')
+-- TODO(oriori1703): remove this import by replacing its usage with `vim.pos`.
+local get_line = require('vim.pos._util').get_line
 
 local Capability = require('vim.lsp._capability')
 
@@ -172,7 +174,7 @@ function M.on_inlayhint(err, result, ctx)
     return
   end
 
-  -- if there's no error but the result is nil, clear existing hints.
+  -- If there's no error but the result is nil, clear existing hints.
   result = result or {}
 
   local new_lnum_hints = {} ---@type table<integer, vim.lsp.inlay_hint.LineHints>
@@ -180,7 +182,7 @@ function M.on_inlayhint(err, result, ctx)
   if num_unprocessed == 0 then
     state.active_request = {}
     state.current_result = {}
-    if vim.fn.win_gettype(vim.fn.bufwinid(bufnr)) == '' then
+    if fn.win_gettype(fn.bufwinid(bufnr)) == '' then
       api.nvim__redraw({ buf = bufnr, valid = true, flush = false })
     end
     return
@@ -210,7 +212,7 @@ function M.on_inlayhint(err, result, ctx)
     namespace_cleared = false,
   }
 
-  if vim.fn.win_gettype(vim.fn.bufwinid(bufnr)) == '' then
+  if fn.win_gettype(fn.bufwinid(bufnr)) == '' then
     api.nvim__redraw({ buf = bufnr, valid = true, flush = false })
   end
 end
@@ -242,7 +244,7 @@ function M.on_refresh(err, _, ctx)
     if provider.client_state[ctx.client_id] then
       provider:reset(ctx.client_id)
 
-      if not vim.tbl_isempty(vim.fn.win_findbuf(bufnr)) then
+      if not vim.tbl_isempty(fn.win_findbuf(bufnr)) then
         provider:refresh(ctx.client_id)
       end
     end
@@ -284,6 +286,8 @@ end
 ---   position = location.range.start,
 --- })
 --- ```
+---
+--- |vim.lsp.inlay_hint.action()| does all of the above for you.
 ---
 --- @param filter vim.lsp.inlay_hint.get.Filter?
 --- @return vim.lsp.inlay_hint.get.ret[]
@@ -344,6 +348,21 @@ function M.get(filter)
   return result
 end
 
+--- Turn an inlay hint into the visible text, merging any label parts.
+--- @param hint lsp.InlayHint
+--- @return string
+local function get_label_text(hint)
+  local label = hint.label
+  if type(label) == 'string' then
+    return label
+  end
+  local parts = {} --- @type string[]
+  for i, part in ipairs(label) do
+    parts[i] = part.value
+  end
+  return table.concat(parts)
+end
+
 --- on_win handler for the decoration provider (see |nvim_set_decoration_provider|)
 ---@package
 ---@param topline integer
@@ -365,20 +384,11 @@ function InlayHint:on_win(topline, botline)
         if line_hints and not line_hints.applied then
           line_hints.applied = true
           for _, hint in pairs(line_hints.hints) do
-            local text = ''
-            local label = hint.label
-            if type(label) == 'string' then
-              text = label
-            else
-              for _, part in ipairs(label) do
-                text = text .. part.value
-              end
-            end
             local vt = hint_virtual_texts[hint.position.character] or {}
             if hint.paddingLeft then
               vt[#vt + 1] = { ' ' }
             end
-            vt[#vt + 1] = { text, 'LspInlayHint' }
+            vt[#vt + 1] = { get_label_text(hint), 'LspInlayHint' }
             if hint.paddingRight then
               vt[#vt + 1] = { ' ' }
             end
@@ -421,474 +431,392 @@ function M.enable(enable, filter)
   Capability.enable('inlay_hint', enable, filter)
 end
 
---- @class (private) vim.lsp.inlay_hint.action.hint_label
---- @field hint lsp.InlayHint
---- @field label lsp.InlayHintLabelPart
+--- A wrapper of `vim.ui.select` that skips the menu when there's only one item.
+--- @generic T
+--- @param items T[] Arbitrary items
+--- @param opts vim.ui.select.Opts Additional options
+--- @param on_choice fun(item: T|nil, idx: integer|nil)
+local function do_or_select(items, opts, on_choice)
+  assert(#items > 0, 'Empty items!')
+  if #items == 1 then
+    return on_choice(items[1], 1)
+  end
+  return vim.ui.select(items, opts, on_choice)
+end
 
-local action_helpers = {
-  --- Turn an inlay hint object into the visible text, merging any label parts.
-  --- Paddings can be optionally included.
-  --- @param hint lsp.InlayHint
-  --- @param with_padding boolean?
-  --- @return string
-  get_label_text = function(hint, with_padding)
-    --- @type string?
-    local label
-    if type(hint.label) == 'string' then
-      label = tostring(hint.label)
-    elseif vim.islist(hint.label) then
-      ---@type string
-      label = vim
-        .iter(hint.label)
-        :map(
-          --- @param part lsp.InlayHintLabelPart
-          function(part)
-            return part.value
-          end
-        )
-        :join('')
-    end
+--- @param path string
+--- @param base string?
+--- @return string
+local function cleanup_path(path, base)
+  -- Relative to `base`, falling back to a path shortened against $HOME.
+  return base and vim.fs.relpath(base, path) or fn.fnamemodify(path, ':p:~')
+end
 
-    assert(label ~= nil, 'Failed to extract the label value from the inlay hint')
+--- Build ranges from the cursor or visual selection, one per selected line.
+--- @return vim.Range[]
+local function make_ranges()
+  local bufnr = api.nvim_get_current_buf()
+  local mode = fn.mode()
+  --- End-exclusive column just past the character at `col`, clamped to the line end.
+  --- @param line string
+  --- @param col integer
+  local function after_char(line, col)
+    return col >= #line and #line or col + vim.str_utf_end(line, col + 1) + 1
+  end
+  if mode ~= 'v' and mode ~= 'V' and mode ~= '\22' then
+    local cursor = vim.pos.cursor(0)
+    local row, col = cursor[1], cursor[2]
+    return { vim.range(bufnr, row, col, row, after_char(get_line(bufnr, row), col)) }
+  end
 
-    if with_padding then
-      if hint.paddingLeft then
-        label = ' ' .. label
+  local ranges = {} --- @type vim.Range[]
+  for _, segment in
+    ipairs(fn.getregionpos(fn.getpos('v'), fn.getpos('.'), {
+      type = mode,
+      exclusive = vim.o.selection == 'exclusive',
+      eol = true,
+    }))
+  do
+    local start_pos, end_pos = segment[1], segment[2]
+    local row, start_col, end_col = start_pos[2] - 1, start_pos[3] - 1, end_pos[3] - 1
+    -- The fourth element is the offset into a multi-cell character. A start that lands
+    -- inside one begins at the next character; an end that lands on one covers all of it.
+    if start_pos[4] > 0 or end_pos[4] == 0 then
+      local line = get_line(bufnr, row)
+      if start_pos[4] > 0 then
+        start_col = after_char(line, start_col)
       end
-      if hint.paddingRight then
-        label = label .. ' '
-      end
-    end
-
-    return label
-  end,
-
-  --- A wrapper of `vim.ui.select` that skips the menu when there's only one item.
-  --- @generic T
-  --- @param items T[] Arbitrary items
-  --- @param opts vim.ui.select.Opts Additional options
-  --- @param on_choice fun(item: T|nil, idx: integer|nil)
-  do_or_select = function(items, opts, on_choice)
-    if #items == 0 then
-      return error('Empty items!')
-    end
-    if #items == 1 then
-      return on_choice(items[1], 1)
-    end
-    return vim.ui.select(items, opts, on_choice)
-  end,
-
-  --- @param path string
-  --- @param base string?
-  --- @return string
-  cleanup_path = function(path, base)
-    ---@type string?
-    local result = nil
-    if base then
-      -- relative to `base`
-      result = vim.fs.relpath(base, path)
-    end
-    if result == nil then
-      result = fn.fnamemodify(path, ':p:~')
-    end
-    return result
-  end,
-
-  --- Build the range from normal or visual mode based on cursor position.
-  --- @return vim.Range
-  make_range = function()
-    local bufnr = api.nvim_get_current_buf()
-    local winid = fn.bufwinid(bufnr)
-    local mode = fn.mode()
-
-    -- Mark position, (1, 0) indexed, end-exclusive
-    --- @type {start: vim.Pos, end: vim.Pos}
-    local range = {}
-
-    if mode == 'n' then
-      local cursor = api.nvim_win_get_cursor(winid)
-      range.start = vim.pos.cursor(cursor)
-      range['end'] = vim.pos.cursor(cursor)
-      range['end'].col = range['end'].col + 1
-    else
-      local start_pos = fn.getpos('v')
-      local end_pos = fn.getpos('.')
-      if
-        start_pos[2] > end_pos[2] or (start_pos[2] == end_pos[2] and start_pos[3] > end_pos[3])
-      then
-        --- @type [integer, integer, integer, integer]
-        start_pos, end_pos = end_pos, start_pos
-      end
-      range = {
-        start = vim.pos.cursor({ start_pos[2], start_pos[3] - 1 }),
-        ['end'] = vim.pos.cursor({ end_pos[2], end_pos[3] }),
-      }
-
-      if mode == 'V' or mode == 'Vs' then
-        range.start.col = 0
-        range['end'].row = range['end'].row + 1
-        range['end'].col = 0
+      if end_pos[4] == 0 then
+        end_col = after_char(line, end_col)
       end
     end
-    range.start.buf = bufnr
-    range['end'].buf = bufnr
-    return vim.range(range.start, range['end'])
-  end,
+    -- An empty segment (an empty line, or a blockwise column past the end of a short
+    -- line) can end before it starts; `vim.range` rejects those.
+    if start_col <= end_col then
+      ranges[#ranges + 1] = vim.range(bufnr, row, start_col, row, end_col)
+    end
+  end
+  return ranges
+end
 
-  --- Append `new_label` to `labels` if there are no duplicates.
-  ---@param labels vim.lsp.inlay_hint.action.hint_label[]
-  ---@param new_label vim.lsp.inlay_hint.action.hint_label
-  ---@param by_attribute ('location'|'command'|'tooltip')[]|nil When provided, only check for these attributes (and `value`) for equality
-  add_new_label = function(labels, new_label, by_attribute)
-    if
-      vim.iter(labels):any(
-        ---@param existing_label vim.lsp.inlay_hint.action.hint_label
-        function(existing_label)
-          -- Check for duplications with existing hint_labels
-          if by_attribute then
-            -- Check for concerned attributes
-            return vim.iter(by_attribute):all(function(attr)
-              return existing_label.label.value == new_label.label.value
-                and vim.deep_equal(existing_label.label[attr], new_label.label[attr])
-            end)
-          else
-            -- Check the entire label
-            return vim.deep_equal(existing_label.label, new_label.label)
-          end
+--- Append `new_label` to `labels` unless an equal label (comparing `value` and each of
+--- `by_attribute`) is already there.
+---@param labels lsp.InlayHintLabelPart[]
+---@param new_label lsp.InlayHintLabelPart
+---@param by_attribute ('location'|'command'|'tooltip')[]
+local function add_new_label(labels, new_label, by_attribute)
+  for _, existing_label in ipairs(labels) do
+    if existing_label.value == new_label.value then
+      local same = true
+      for _, attr in ipairs(by_attribute) do
+        if not vim.deep_equal(existing_label[attr], new_label[attr]) then
+          same = false
+          break
         end
-      )
-    then
-      return
+      end
+      if same then
+        return
+      end
     end
-    table.insert(labels, new_label)
-  end,
-}
+  end
+  table.insert(labels, new_label)
+end
 
----Return a non-empty list of hint label, or `nil` if not found.
+---Return the deduplicated hint label parts carrying at least one of `needed_fields`.
 --- @param hint lsp.InlayHint
---- @param needed_fields ("location"|"command"|"tooltip")[]?
---- @return vim.lsp.inlay_hint.action.hint_label[]?
-action_helpers.get_hint_labels = function(hint, needed_fields)
-  vim.validate('needed_fields', needed_fields, function(val)
-    return vim.islist(val)
-      and vim.iter(needed_fields):any(function(field)
-        return vim.list_contains({ 'location', 'command', 'tooltip' }, field)
-      end)
-  end, false)
-  --- @type vim.lsp.inlay_hint.action.hint_label[]
+--- @param needed_fields ("location"|"command"|"tooltip")[]
+--- @return lsp.InlayHintLabelPart[]
+local function get_hint_labels(hint, needed_fields)
+  --- @type lsp.InlayHintLabelPart[]
   local hint_labels = {}
 
-  if type(hint.label) == 'table' and #hint.label > 0 then
-    vim.iter(hint.label):each(
-      --- @param label lsp.InlayHintLabelPart
-      function(label)
-        if
-          vim.iter(needed_fields):any(function(field_name)
-            return label[field_name] ~= nil
-          end)
-        then
-          action_helpers.add_new_label(hint_labels, { hint = hint, label = label }, needed_fields)
+  if type(hint.label) == 'table' then
+    for _, label in ipairs(hint.label) do
+      for _, field_name in ipairs(needed_fields) do
+        if label[field_name] ~= nil then
+          add_new_label(hint_labels, label, needed_fields)
+          break
         end
       end
-    )
+    end
   end
 
-  if #hint_labels > 0 then
-    return hint_labels
+  return hint_labels
+end
+
+--- @class (private) vim.lsp.inlay_hint.action.internal_context : vim.lsp.inlay_hint.action.context
+--- @field is_valid fun(): boolean
+--- @field win integer
+
+--- Whether the action can still show something: the source buffer is unchanged and the
+--- window the action started from is still around.
+--- @param ctx vim.lsp.inlay_hint.action.internal_context
+local function can_show(ctx)
+  return ctx.is_valid() and api.nvim_win_is_valid(ctx.win)
+end
+
+--- The hint an action that handles a single hint should use, warning when several were given.
+--- @param hints lsp.InlayHint[]
+--- @param action vim.lsp.inlay_hint.action.name
+--- @return lsp.InlayHint?
+local function single_hint(hints, action)
+  if #hints > 1 then
+    vim.schedule(function()
+      vim.notify(
+        ('vim.lsp.inlay_hint.action(%q) only supports a single inlay hint.'):format(action),
+        vim.log.levels.WARN
+      )
+    end)
   end
+  return hints[1]
 end
 
 --- The built-in action handlers.
---- @type table<vim.lsp.inlay_hint.action.name, vim.lsp.inlay_hint.action.handler>
-local inlayhint_actions = {
-  textEdits = function(hints, ctx, on_finish)
-    ---@type lsp.InlayHint[]
-    local valid_hints = vim
-      .iter(hints)
-      :filter(
-        --- @param hint lsp.InlayHint
-        function(hint)
-          -- only keep those that have text edits.
-          return hint ~= nil and hint.textEdits ~= nil and not vim.tbl_isempty(hint.textEdits)
-        end
-      )
-      :totable()
-    --- @type lsp.TextEdit[]
-    local text_edits = vim
-      .iter(valid_hints)
-      :map(
-        --- @param hint lsp.InlayHint
-        function(hint)
-          return hint.textEdits
-        end
-      )
-      :flatten(1)
-      :totable()
-    if #text_edits > 0 then
-      vim.schedule(function()
-        util.apply_text_edits(text_edits, ctx.bufnr, ctx.client.offset_encoding)
-        if on_finish then
-          on_finish({ bufnr = ctx.bufnr, client = ctx.client })
-        end
-      end)
+--- @type table<vim.lsp.inlay_hint.action.name, fun(hints: lsp.InlayHint[], ctx: vim.lsp.inlay_hint.action.internal_context, on_done: vim.lsp.inlay_hint.action.on_done.callback): boolean>
+local action_handlers = {
+  textEdits = function(hints, ctx, on_done)
+    local text_edits = {} --- @type lsp.TextEdit[]
+    for _, hint in ipairs(hints) do
+      vim.list_extend(text_edits, hint.textEdits or {})
     end
-    return #valid_hints
-  end,
-  location = function(hints, ctx, on_finish)
-    local count = 0
-
-    --- @type vim.lsp.inlay_hint.action.hint_label[]
-    local hint_labels = {}
-
-    vim.iter(hints):each(
-      --- @param item lsp.InlayHint
-      function(item)
-        if type(item.label) == 'table' and #item.label > 0 then
-          local labels_from_this = action_helpers.get_hint_labels(item, { 'location' })
-          if labels_from_this then
-            count = count + 1
-            vim.list_extend(hint_labels, labels_from_this)
-          end
-        end
-      end
-    )
-
-    if vim.tbl_isempty(hint_labels) then
-      return 0
+    if #text_edits == 0 then
+      return false
     end
-
-    action_helpers.do_or_select(
-      vim
-        .iter(hint_labels)
-        :map(
-          --- @param loc vim.lsp.inlay_hint.action.hint_label
-          function(loc)
-            local label = loc.label
-            return string.format(
-              '%s\t%s:%d',
-              label.value,
-              action_helpers.cleanup_path(vim.uri_to_fname(label.location.uri), ctx.client.root_dir),
-              label.location.range.start.line
-            )
-          end
-        )
-        :totable(),
-      { prompt = 'Location to jump to' },
-      function(_, idx)
-        if idx then
-          util.show_document(
-            hint_labels[idx].label.location,
-            ctx.client.offset_encoding,
-            { reuse_win = true, focus = true }
-          )
-
-          if on_finish then
-            on_finish({ bufnr = api.nvim_get_current_buf(), client = ctx.client })
-          end
-        end
-      end
-    )
-
-    return count
-  end,
-
-  hover = function(hints, ctx, on_finish)
-    if #hints == 0 then
-      return 0
-    end
-    if #hints ~= 1 then
-      vim.schedule(function()
-        vim.notify(
-          'vim.lsp.inlay_hint.action("hover") only supports showing hover for a single inlay hint.',
-          vim.log.levels.WARN
-        )
-      end)
-    end
-    local hint = assert(hints[1])
-    local hint_labels = action_helpers.get_hint_labels(hint, { 'location' })
-    if hint_labels == nil then
-      return 0
-    end
-
-    ---@type string[]
-    local lines = {}
-
-    --- Go through the labels to build the content of the hover
-    ---@param idx integer?
-    ---@param item vim.lsp.inlay_hint.action.hint_label?
-    local function get_hover(idx, item)
-      if idx == nil or item == nil then
-        -- all locations have been processed
-        -- open the hover window
-        if #lines == 0 then
-          lines = { 'Empty' }
-        end
-        local float_buf, _ = util.open_floating_preview(lines, 'markdown')
-        if on_finish then
-          on_finish({ client = ctx.client, bufnr = float_buf })
-        end
+    vim.schedule(function()
+      if not ctx.is_valid() then
+        on_done({ buf = ctx.buf })
         return
       end
+      util.apply_text_edits(text_edits, ctx.buf, ctx.client.offset_encoding)
+      on_done({ buf = ctx.buf, client = ctx.client })
+    end)
+    return true
+  end,
+  location = function(hints, ctx, on_done)
+    --- @type lsp.InlayHintLabelPart[]
+    local hint_labels = {}
 
-      -- `get_hint_labels` makes sure `item.label` has location attribute
-      local label_loc = assert(item.label.location)
+    for _, item in ipairs(hints) do
+      vim.list_extend(hint_labels, get_hint_labels(item, { 'location' }))
+    end
+
+    if vim.tbl_isempty(hint_labels) then
+      return false
+    end
+
+    do_or_select(hint_labels, {
+      prompt = 'Location to jump to',
+      kind = 'inlay_hint_location',
+      --- @param item lsp.InlayHintLabelPart
+      format_item = function(item)
+        local location = assert(item.location)
+        return string.format(
+          '%s\t%s:%d',
+          item.value,
+          cleanup_path(vim.uri_to_fname(location.uri), ctx.client.root_dir),
+          location.range.start.line
+        )
+      end,
+    }, function(item, idx)
+      if idx == nil or not can_show(ctx) then
+        -- `vim.ui.select` was cancelled
+        on_done({ buf = ctx.buf })
+        return
+      end
+      api.nvim_set_current_win(ctx.win)
+      local shown = util.show_document(
+        assert(item.location),
+        ctx.client.offset_encoding,
+        { reuse_win = true, focus = true }
+      )
+      on_done({
+        buf = shown and api.nvim_get_current_buf() or ctx.buf,
+        client = shown and ctx.client or nil,
+      })
+    end)
+
+    return true
+  end,
+
+  hover = function(hints, ctx, on_done)
+    local hint = single_hint(hints, 'hover')
+    if not hint then
+      return false
+    end
+    local hint_labels = get_hint_labels(hint, { 'location' })
+    if #hint_labels == 0 then
+      return false
+    end
+
+    local function abort()
+      on_done({ buf = ctx.buf })
+    end
+
+    --- Assemble the sections in label order and show them.
+    ---@param sections table<integer, string[]>
+    local function show(sections)
+      if not can_show(ctx) then
+        return abort()
+      end
+      local lines = {} --- @type string[]
+      for i = 1, #hint_labels do
+        if sections[i] then
+          if #lines > 0 then
+            -- Blank line between label parts
+            lines[#lines + 1] = ''
+          end
+          vim.list_extend(lines, sections[i])
+        end
+      end
+      if #lines == 0 then
+        return abort()
+      end
+      local float_buf = api.nvim_win_call(ctx.win, function()
+        return util.open_floating_preview(lines, 'markdown')
+      end)
+      on_done({ client = ctx.client, buf = float_buf })
+    end
+
+    -- The locations are independent, so request them all at once and assemble the
+    -- hover once the last reply arrives.
+    local sections = {} --- @type table<integer, string[]>
+    local remaining = #hint_labels
+    for i, item in ipairs(hint_labels) do
+      ---@param section string[]?
+      local function complete(section)
+        sections[i] = section
+        remaining = remaining - 1
+        if remaining == 0 then
+          show(sections)
+        end
+      end
+
+      -- `get_hint_labels` makes sure `item` has a location attribute
+      local label_loc = assert(item.location)
       ---@type lsp.HoverParams
       local hover_param = {
         textDocument = { uri = label_loc.uri },
         position = label_loc.range.start,
       }
-      ctx.client:request(
+      local success = ctx.client:request(
         'textDocument/hover',
         hover_param,
         ---@param result lsp.Hover?
-        function(_, result, _, _)
-          if result then
-            local md_lines = util.convert_input_to_markdown_lines(result.contents)
-            if #md_lines > 0 then
-              if #lines > 0 then
-                -- Blank line between label parts
-                lines[#lines + 1] = ''
-              end
-              lines[#lines + 1] = string.format('# `%s`', item.label.value)
-              vim.list_extend(lines, md_lines)
-            end
+        function(_, result)
+          local md_lines = result and util.convert_input_to_markdown_lines(result.contents) or {}
+          if #md_lines == 0 then
+            return complete(nil)
           end
-          get_hover(next(hint_labels, idx))
+          complete(vim.list_extend({ string.format('# `%s`', item.value) }, md_lines))
         end,
-        ctx.bufnr
+        ctx.buf
       )
+      if not success then
+        complete(nil)
+      end
     end
 
-    get_hover(next(hint_labels))
-    return 1
+    return true
   end,
 
-  tooltip = function(hints, ctx, on_finish)
-    if #hints == 0 then
-      return 0
+  tooltip = function(hints, ctx, on_done)
+    local hint = single_hint(hints, 'tooltip')
+    if not hint then
+      return false
     end
-    if #hints ~= 1 then
-      vim.schedule(function()
-        vim.notify(
-          'vim.lsp.inlay_hint.action("tooltip") only supports showing tooltips for a single inlay hint.',
-          vim.log.levels.WARN
-        )
-      end)
-    end
-
-    local hint = assert(hints[1])
-    local hint_labels = action_helpers.get_hint_labels(hint, { 'location', 'command' })
+    local hint_labels = get_hint_labels(hint, { 'location', 'command', 'tooltip' })
 
     -- The level 1 heading is the full hint object
-    local lines = { string.format('# `%s`', action_helpers.get_label_text(hint, false)), '' }
+    local lines = { string.format('# `%s`', get_label_text(hint)), '' }
 
     if hint.tooltip then
       util.convert_input_to_markdown_lines(hint.tooltip, lines)
     end
 
-    if hint_labels then
-      vim.iter(hint_labels):each(
-        --- @param hint_label vim.lsp.inlay_hint.action.hint_label
-        function(hint_label)
-          local label = hint_label.label
-          lines[#lines + 1] = ''
-          -- each of the level 2 headings is the text of a label part
-          lines[#lines + 1] = string.format('## `%s`', label.value)
-          lines[#lines + 1] = ''
-          if label.tooltip then
-            -- borrowed from `vim.lsp.buf.hover()`
-            util.convert_input_to_markdown_lines(label.tooltip, lines)
-          end
-          if label.location then
-            -- include the location in this label part
-            lines[#lines + 1] = string.format(
-              '_Location_: `%s`:%d',
-              action_helpers.cleanup_path(vim.uri_to_fname(label.location.uri), ctx.client.root_dir),
-              label.location.range.start.line
-            )
-          end
-          if label.command then
-            -- include the command associated to this label part
-            local command_line = string.format('_Command_: %s', label.command.title)
-            if label.command.tooltip then
-              command_line = command_line .. string.format(' (%s)', label.command.tooltip)
-            end
-            lines[#lines + 1] = command_line
-          end
+    for _, label in ipairs(hint_labels) do
+      lines[#lines + 1] = ''
+      -- Each of the level 2 headings is the text of a label part.
+      lines[#lines + 1] = string.format('## `%s`', label.value)
+      lines[#lines + 1] = ''
+      if label.tooltip then
+        util.convert_input_to_markdown_lines(label.tooltip, lines)
+      end
+      if label.location then
+        lines[#lines + 1] = string.format(
+          '_Location_: `%s`:%d',
+          cleanup_path(vim.uri_to_fname(label.location.uri), ctx.client.root_dir),
+          label.location.range.start.line
+        )
+      end
+      if label.command then
+        local command_line = string.format('_Command_: %s', label.command.title)
+        if label.command.tooltip then
+          command_line = command_line .. string.format(' (%s)', label.command.tooltip)
         end
-      )
+        lines[#lines + 1] = command_line
+      end
     end
 
     if #lines == 2 then
       -- No tooltip/command/location has been found. Skip this hint.
-      return 0
+      return false
     end
 
-    ---@type integer, integer
-    local buf, _ = util.open_floating_preview(lines, 'markdown')
-
-    if on_finish then
-      on_finish({ bufnr = buf, client = ctx.client })
+    if not can_show(ctx) then
+      on_done({ buf = ctx.buf })
+      return true
     end
-    return 1
+    local buf = api.nvim_win_call(ctx.win, function()
+      return util.open_floating_preview(lines, 'markdown')
+    end)
+    on_done({ buf = buf, client = ctx.client })
+    return true
   end,
 
-  command = function(hints, ctx, on_finish)
-    if #hints ~= 1 then
-      vim.schedule(function()
-        vim.notify(
-          'vim.lsp.inlay_hint.action("command") only supports showing commands for a single inlay hint.',
-          vim.log.levels.WARN
-        )
-      end)
+  command = function(hints, ctx, on_done)
+    local hint = single_hint(hints, 'command')
+    if not hint then
+      return false
     end
-    if #hints == 0 then
-      return 0
-    end
-    local hint_labels = action_helpers.get_hint_labels(assert(hints[1]), { 'command' })
-    if hint_labels == nil or #hint_labels == 0 then
+    local hint_labels = get_hint_labels(hint, { 'command' })
+    if #hint_labels == 0 then
       -- no commands in this hint
-      return 0
+      return false
     end
 
-    action_helpers.do_or_select(
-      vim
-        .iter(hint_labels)
-        :map(
-          --- @param item vim.lsp.inlay_hint.action.hint_label
-          function(item)
-            local label = item.label
-            local entry_line = string.format('%s: %s', label.value, assert(label.command).title)
-            if label.tooltip then
-              entry_line = entry_line .. string.format(' (%s)', label.tooltip)
-            end
-            return entry_line
-          end
-        )
-        :totable(),
-      { prompt = 'Command to execute' },
-      function(_, idx)
-        if idx == nil then
-          -- `vim.ui.select` was cancelled
-          if on_finish then
-            on_finish({ bufnr = ctx.bufnr, client = ctx.client })
-          end
-          return
+    do_or_select(hint_labels, {
+      prompt = 'Command to execute',
+      kind = 'inlay_hint_command',
+      --- @param item lsp.InlayHintLabelPart
+      format_item = function(item)
+        local entry_line = string.format('%s: %s', item.value, assert(item.command).title)
+        if item.tooltip then
+          entry_line = entry_line .. string.format(' (%s)', item.tooltip)
         end
-        ctx.client:request('workspace/executeCommand', hint_labels[idx].label.command, function(...)
-          local default_handler = ctx.client.handlers['workspace/executeCommand']
-            or vim.lsp.handlers['workspace/executeCommand']
-          if default_handler then
-            default_handler(...)
-          end
-          if on_finish then
-            on_finish({ bufnr = api.nvim_get_current_buf(), client = ctx.client })
-          end
-        end, ctx.bufnr)
+        return entry_line
+      end,
+    }, function(item, idx)
+      if idx == nil or not ctx.is_valid() then
+        -- `vim.ui.select` was cancelled
+        on_done({ buf = ctx.buf })
+        return
       end
-    )
+      local cmd = assert(item.command)
+      local success, request_id = ctx.client:exec_cmd(cmd, { bufnr = ctx.buf }, function(err, ...)
+        -- A caller-supplied handler replaces the default one, so run it explicitly to
+        -- keep the standard error reporting.
+        assert(ctx.client:_resolve_handler('workspace/executeCommand'))(err, ...)
+        on_done({ buf = ctx.buf, client = not err and ctx.client or nil })
+      end)
+      if not success then
+        on_done({ buf = ctx.buf })
+      elseif not request_id then
+        -- The command ran locally, so the handler above is never called.
+        on_done({ buf = ctx.buf, client = ctx.client })
+      end
+    end)
 
-    return 1
+    return true
   end,
 }
 
@@ -899,42 +827,60 @@ local inlayhint_actions = {
 ---| 'hover' -- Show a hover window of the symbols shown in the inlay hint
 ---| 'tooltip' -- Show a hover-like window, containing available tooltips, commands and locations
 
---- @alias vim.lsp.inlay_hint.action
+--- A built-in action name, or a custom handler.
+--- @alias vim.lsp.inlay_hint.action.spec
 ---| vim.lsp.inlay_hint.action.name
 ---| vim.lsp.inlay_hint.action.handler
 
 --- @class vim.lsp.inlay_hint.action.context
 --- @inlinedoc
---- @field bufnr integer
+--- @field buf integer
 --- @field client vim.lsp.Client
 
---- @class vim.lsp.inlay_hint.action.on_finish.context
+--- @class vim.lsp.inlay_hint.action.on_done.context
 --- @inlinedoc
---- @field client? vim.lsp.Client The LSP client used to trigger the action if the action was successfully triggered.
---- If the action opened or jumped to a new buffer, this will be the buffer number.
---- Otherwise it'll be the original buffer.
---- @field bufnr integer
+---
+--- The buffer opened or jumped to by the action, or the source buffer otherwise.
+--- The source buffer may no longer be valid if it was deleted during the action.
+--- @field buf integer
+---
+--- The `vim.lsp.Client` used to invoke the action. `nil` when no action was invoked.
+--- @field client? vim.lsp.Client
 
---- This should be called __exactly__ once in the action handler.
---- @alias vim.lsp.inlay_hint.action.on_finish.callback fun(ctx: vim.lsp.inlay_hint.action.on_finish.context)
+--- Always supplied to action handlers. Call exactly once when a handled action finishes.
+--- @alias vim.lsp.inlay_hint.action.on_done.callback fun(ctx: vim.lsp.inlay_hint.action.on_done.context)
 
---- @alias vim.lsp.inlay_hint.action.handler fun(hints: lsp.InlayHint[], ctx: vim.lsp.inlay_hint.action.context, on_finish: vim.lsp.inlay_hint.action.on_finish.callback?):integer
+--- @alias vim.lsp.inlay_hint.action.handler fun(hints: lsp.InlayHint[], ctx: vim.lsp.inlay_hint.action.context, on_done: vim.lsp.inlay_hint.action.on_done.callback):boolean
 
 --- @class vim.lsp.inlay_hint.action.Opts
 --- @inlinedoc
+---
 --- Inlay hints (returned by `vim.lsp.inlay_hint.get()`) to take actions on.
+--- All hints must belong to the same buffer, which need not be the current buffer.
+--- Mixed-buffer lists are rejected before any action is taken.
 --- When not specified:
 ---   - in |Normal-mode|, it uses hints on either side of the cursor.
 ---   - in |Visual-mode|, it uses hints inside the selected range.
 --- @field hints? vim.lsp.inlay_hint.get.ret[]
+---
+--- A callback invoked exactly once (asynchronously) at the end of the action.
+--- Also invoked when no action is taken, selection is cancelled, or a request fails.
+--- Receives a context with these fields:
+---   - `buf`: the preview buffer for hover/tooltip, the destination buffer for location,
+---     or the source buffer otherwise. The source buffer may have been deleted.
+---   - `client`: the client used by the action, or nil when no action was taken.
+--- @field on_done? vim.lsp.inlay_hint.action.on_done.callback
 
 --- Apply some actions provided by inlay hints in the selected range.
+--- Built-in actions are abandoned if the source buffer changes or is unloaded before
+--- they can be applied. The "hover", "tooltip", and "command" actions use only the first
+--- hint from each client, and warn if multiple hints were supplied for that client.
 ---
 --- Example usage:
 --- ```lua
 --- vim.keymap.set(
 ---   { 'n', 'v' },
----   'gI',
+---   'grI',
 ---   function()
 ---     vim.lsp.inlay_hint.action('textEdits')
 ---   end,
@@ -942,7 +888,7 @@ local inlayhint_actions = {
 --- )
 --- ```
 ---
---- @param action vim.lsp.inlay_hint.action
+--- @param action vim.lsp.inlay_hint.action.spec
 --- Possible actions:
 --- - `"textEdits"`: insert `textEdits` that comes with the inlay hints.
 --- - `"location"`: jump to one of the locations associated with the inlay hints.
@@ -952,148 +898,169 @@ local inlayhint_actions = {
 --- - `"tooltip"`: show a hover-like window that contains the `tooltip`, available `command`s and
 ---   `location`s that comes with the inlay hint.
 --- - a custom handler with 3 parameters:
----   - `hints`: `lsp.InlayHint[]` a list of inlay hints in the requested range.
----   - `ctx`: `{bufnr: integer, client: vim.lsp.Client}` the buffer number on which the action is taken, and the LSP client that provides `hints`.
----   - `on_finish`: `fun(_ctx: {bufnr: integer, client?: vim.lsp.Client})` see the `callback` parameter of `vim.lsp.inlay_hint.action`.
----     When implementing a custom handler, the `on_finish` callback should be called when the handler is returning a non-zero value.
+---   - `hints`: `lsp.InlayHint[]` a list of inlay hints in the requested range. Hint positions
+---     use byte indices, as in `vim.lsp.inlay_hint.get()`.
+---   - `ctx`: `{buf: integer, client: vim.lsp.Client}` the buffer on which the action is taken, and the LSP client that provides `hints`.
+---   - `on_done`: `fun(ctx: {buf: integer, client?: vim.lsp.Client})` see `on_done` in {opts}.
+---     Always supplied, even when {opts} omits `on_done`.
 ---
----   This custom handler should also return the number of items in `hints` that contributed to the action. For example, the `location` handler should return `1` on a successful jump because the target location is from 1 inlay hint object, regardless of the number of hints in `hints`.
+---   The handler must return `true` if it handled the action (and then call `on_done` exactly
+---   once when the action finishes), or `false` if `hints` did not contain what the action
+---   needs, in which case the hints of the next available client are tried.
 --- @param opts? vim.lsp.inlay_hint.action.Opts
---- @param callback? fun(ctx: {bufnr: integer, client?: vim.lsp.Client})
---- A callback function that will be triggered exactly once (asynchronously) at the end of the action.
---- It accepts a table with the following keys as the parameter:
---- - `bufnr`: the buffer number that is focused on. If there's any jump-to-location or pop-up,
----   this'll points you to the new buffer.
---- - `client?`: the `vim.lsp.Client` used to invoke the action. `nil` when the action failed
----   to be invoked.
-function M.action(action, opts, callback)
+function M.action(action, opts)
   vim.validate('action', action, function(val)
-    return type(val) == 'function' or type(inlayhint_actions[val]) == 'function'
+    return type(val) == 'function' or type(action_handlers[val]) == 'function'
   end, false)
   vim.validate('opts', opts, 'table', true)
-  vim.validate('callback', callback, 'function', true)
-
-  local action_handler = action
-  if type(action) == 'string' then
-    action_handler = inlayhint_actions[action]
-    --- @cast action_handler -vim.lsp.inlay_hint.action.name
-  end
 
   opts = opts or {}
+  vim.validate('opts.on_done', opts.on_done, 'function', true)
+  vim.validate('opts.hints', opts.hints, vim.islist, true, 'list')
 
+  local win = api.nvim_get_current_win()
   local bufnr = api.nvim_get_current_buf()
-
-  local on_finish_cb_called = false
-  if callback then
-    local original_callback = callback
-    -- Decorate the `on_finish` callback to make sure it only called once.
-    ---@type vim.lsp.inlay_hint.action.on_finish.callback
-    callback = function(...)
-      assert(not on_finish_cb_called, 'The callback should only be called once.')
-      on_finish_cb_called = true
-      return original_callback(...)
-    end
-  end
-
   local hints = opts.hints
   if hints == nil then
-    local range = action_helpers.make_range()
-    hints = M.get({
-      range = {
-        -- In `M.on_inlayhint`,
-        -- the inlay hints are stored by byte indices, not lsp positions (utf-*),
-        -- so we can't use `vim.range.to_lsp`
-        start = { line = range.start.row, character = range.start.col },
-        ['end'] = { line = range.end_.row, character = range.end_.col },
-      },
-      bufnr = bufnr,
-    })
-  end
-  --- Group inlay hints by clients.
-  ---@type table<integer, lsp.InlayHint[]>
-  local hints_by_clients = vim.defaulttable(function(_)
-    return {}
-  end)
-
-  vim.iter(hints):each(
-    ---@param item vim.lsp.inlay_hint.get.ret
-    function(item)
-      table.insert(hints_by_clients[item.client_id], item.inlay_hint)
+    hints = {}
+    for _, range in ipairs(make_ranges()) do
+      -- Cached hint positions are byte-indexed, so use UTF-8 rather than the
+      -- client's encoding. get() includes both endpoints, selecting hints on
+      -- either side of the cursor or selected characters.
+      vim.list_extend(hints, M.get({ bufnr = range.buf, range = range:to_lsp('utf-8') }))
     end
-  )
+  else
+    for _, item in ipairs(hints) do
+      vim.validate('hint.bufnr', item.bufnr, 'number')
+      vim.validate('hint.client_id', item.client_id, 'number')
+      vim.validate('hint.inlay_hint', item.inlay_hint, 'table')
+    end
+  end
+  if hints[1] then
+    bufnr = vim._resolve_bufnr(hints[1].bufnr)
+  end
 
-  ---@type vim.lsp.Client[]
-  local clients = vim
-    .iter(vim.tbl_keys(hints_by_clients))
-    :map(function(cli_id)
-      return vim.lsp.get_client_by_id(cli_id)
-    end)
-    :totable()
+  -- Group the whole list before scheduling any work.
+  ---@type table<integer, lsp.InlayHint[]>
+  local hints_by_clients = vim.defaulttable()
+  for _, item in ipairs(hints) do
+    assert(vim._resolve_bufnr(item.bufnr) == bufnr, 'All hints must belong to the same buffer')
+    table.insert(hints_by_clients[item.client_id], item.inlay_hint)
+  end
 
-  --- Iterate through `clients` and requests for inlay hints.
-  --- If a client provides no inlay hint (`nil` or `{}`) for the given range, or the provided hints don't contain
-  --- the attributes needed for the action, proceed to the next client. Otherwise, the action is
-  --- successful. Terminate the iteration.
-  --- @param idx? integer
-  --- @param client? vim.lsp.Client
-  local function do_action(idx, client)
-    if idx == nil or client == nil or on_finish_cb_called then
-      -- all clients have been consumed. Terminate the iteration.
-      if callback and not on_finish_cb_called then
-        callback({ bufnr = api.nvim_get_current_buf() })
+  local changedtick = api.nvim_buf_is_loaded(bufnr) and api.nvim_buf_get_changedtick(bufnr)
+  local finished = false
+  --- @type vim.lsp.inlay_hint.action.on_done.callback
+  local function on_done(ctx)
+    if finished then
+      return
+    end
+    finished = true
+    if opts.on_done then
+      vim.schedule(function()
+        opts.on_done(ctx)
+      end)
+    end
+  end
+
+  local function is_valid()
+    return not finished
+      and api.nvim_buf_is_loaded(bufnr)
+      and api.nvim_buf_get_changedtick(bufnr) == changedtick
+  end
+
+  local client_ids = vim.tbl_keys(hints_by_clients)
+  -- `vim.tbl_keys` ordering is not deterministic; try clients in a stable order.
+  table.sort(client_ids)
+
+  --- Try clients in order until one handles the action.
+  --- @param idx integer
+  local function do_action(idx)
+    if not is_valid() or not client_ids[idx] then
+      on_done({ buf = bufnr })
+      return
+    end
+    local client = vim.lsp.get_client_by_id(client_ids[idx])
+    if not client or client:is_stopped() then
+      return do_action(idx + 1)
+    end
+
+    --- @param resolved lsp.InlayHint[]
+    local function apply(resolved)
+      if not is_valid() then
+        on_done({ buf = bufnr })
+        return
       end
+      local handled
+      if type(action) == 'function' then
+        handled = action(resolved, { buf = bufnr, client = client }, on_done)
+      else
+        --- @cast action vim.lsp.inlay_hint.action.name
+        handled = action_handlers[action](resolved, {
+          buf = bufnr,
+          client = client,
+          win = win,
+          is_valid = is_valid,
+        }, on_done)
+      end
+      if not handled and not finished then
+        do_action(idx + 1)
+      end
+    end
+
+    -- Copy so that handlers cannot mutate the cached hints. Only the clients actually
+    -- tried pay for this.
+    local client_hints = vim.deepcopy(hints_by_clients[client.id], true)
+    if not client:supports_method('inlayHint/resolve', bufnr) then
+      apply(client_hints)
       return
     end
 
-    local _hints = hints_by_clients[client.id]
-
-    if #_hints == 0 then
-      -- no hints in the given range.
-      return do_action(next(clients, idx))
-    end
-
-    local support_resolve = client:supports_method('inlayHint/resolve', bufnr)
-    local action_ctx = { bufnr = bufnr, client = client }
-
-    if not support_resolve then
-      -- no need to resolve because the client doesn't support it.
-      if action_handler(_hints, action_ctx, callback) == 0 then
-        -- no actions invoked. proceed with the client.
-        return do_action(next(clients, idx))
-      else
-        -- actions were taken. we're done with the actions.
-        return
-      end
-    end
-
-    --- NOTE: make async `inlayHint/resolve` requests in parallel
-
-    -- Use `num_processed` to keep track of the number of resolved hints.
-    -- When this equals `#hints`, it means we're ready to invoke the actions.
-    --- @type integer
-    local num_processed = 0
-
-    for i, h in ipairs(_hints) do
-      client:request('inlayHint/resolve', h, function(_, _result, _, _)
-        if _result ~= nil and _hints[i] then
-          _hints[i] = vim.tbl_deep_extend('force', _hints[i], _result)
-        end
-        num_processed = num_processed + 1
-
-        if num_processed == #_hints then
-          -- all hints have been resolved. we're now ready to invoke the action.
-          if action_handler(_hints, action_ctx, callback) == 0 then
-            return do_action(next(clients, idx))
-          else
-            -- Actions were taken. we're done with the actions.
-            return
+    -- Resolve in parallel, retaining input order even when replies arrive out of order.
+    local remaining = #client_hints
+    local resolved = {} --- @type table<integer, lsp.InlayHint>
+    for i, hint in ipairs(client_hints) do
+      --- @param result lsp.InlayHint?
+      local function complete(result)
+        resolved[i] = result
+        remaining = remaining - 1
+        if remaining == 0 then
+          local ordered = {} --- @type lsp.InlayHint[]
+          for j = 1, #client_hints do
+            if resolved[j] then
+              ordered[#ordered + 1] = resolved[j]
+            end
           end
+          apply(ordered)
         end
-      end, bufnr)
+      end
+      if action == 'textEdits' and hint.textEdits ~= nil then
+        complete(hint)
+      else
+        -- Only `position` is replaced, so the rest can stay shared with `hint`.
+        local params = vim.tbl_extend('force', {}, hint) --[[@as lsp.InlayHint]]
+        params.position =
+          vim.pos(bufnr, hint.position.line, hint.position.character):to_lsp(client.offset_encoding)
+        local success = client:request('inlayHint/resolve', params, function(err, result)
+          if err or not result then
+            complete(nil)
+          else
+            local merged = vim.tbl_deep_extend('force', hint, result)
+            -- Keep handler positions byte-indexed, like get(), without changing the cache.
+            merged.position = hint.position
+            complete(merged)
+          end
+        end, bufnr)
+        if not success then
+          complete(nil)
+        end
+      end
     end
   end
 
-  do_action(next(clients))
+  vim.schedule(function()
+    do_action(1)
+  end)
 end
 
 return M

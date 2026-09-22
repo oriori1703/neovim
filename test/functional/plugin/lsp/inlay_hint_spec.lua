@@ -457,6 +457,56 @@ test text
   end)
 end)
 
+--- Installs the shared action driver in the child process:
+--- * `run_inlay_action(action, hints?, during?)` runs an action, checks the completion
+---   contract, and reports the buffer left in focus. `during` runs after `action()`
+---   returns but before waiting for it to finish.
+--- * `capture_hints(record)` is an action handler that records the hints it is given.
+local function setup_action_driver()
+  exec_lua(function()
+    --- @return {buf: integer, client_id: integer?, win: integer?, lines: string[]?}
+    function _G.run_inlay_action(action, hints, during)
+      local result ---@type table?
+      local calls, returned = 0, false
+      vim.lsp.inlay_hint.action(action, {
+        hints = hints,
+        on_done = function(ctx)
+          assert(returned, 'on_done must be asynchronous')
+          calls = calls + 1
+          result = { buf = ctx.buf, client_id = ctx.client and ctx.client.id }
+        end,
+      })
+      returned = true
+      if during then
+        during()
+      end
+      assert(
+        vim.wait(5000, function()
+          return result ~= nil
+        end),
+        'action() did not finish'
+      )
+      vim.wait(0)
+      assert(calls == 1, 'on_done must run exactly once')
+      -- An action may leave behind a buffer that was deleted while it ran.
+      if vim.api.nvim_buf_is_valid(result.buf) then
+        result.win = vim.fn.bufwinid(result.buf)
+        result.lines = vim.api.nvim_buf_get_lines(result.buf, 0, -1, false)
+      end
+      return result
+    end
+
+    --- @param record fun(hints: lsp.InlayHint[])
+    function _G.capture_hints(record)
+      return function(hints, ctx, done)
+        record(hints)
+        done(ctx)
+        return true
+      end
+    end
+  end)
+end
+
 describe('vim.lsp.inlay_hint.action', function()
   ---@type table<string, {lines: string[], name: string, filetype: string, bufnr: integer?, uri: string}>
   local mocked_files = {
@@ -498,215 +548,87 @@ describe('vim.lsp.inlay_hint.action', function()
     },
   }
 
+  --- The location all `MyStruct` label parts point at (the struct definition in lib.rs).
+  ---@type lsp.Location
+  local lib_location = {
+    uri = mocked_files.lib.uri,
+    range = {
+      start = { line = 0, character = 11 },
+      ['end'] = { line = 0, character = 19 },
+    },
+  }
+
+  --- The hints as they look after `inlayHint/resolve`.
   ---@type lsp.InlayHint[]
   local resolved_response = {
     {
-      kind = 1,
       label = {
+        { value = ': ' },
         {
-          value = ': ',
-        },
-        {
-          location = {
-            range = {
-              ['end'] = {
-                character = 19,
-                line = 0,
-              },
-              start = {
-                character = 11,
-                line = 0,
-              },
-            },
-            uri = mocked_files.lib.uri,
-          },
+          value = 'MyStruct',
+          location = lib_location,
           command = { title = 'Dummy command', command = 'dummy_command' },
           tooltip = 'string tooltip',
-          value = 'MyStruct',
         },
       },
       tooltip = { kind = 'plaintext', value = 'plaintext markup tooltip' },
-      paddingLeft = false,
-      paddingRight = false,
-      position = {
-        character = 19,
-        line = 7,
-      },
+      position = { line = 7, character = 19 },
       textEdits = {
         {
           newText = ': MyStruct',
           range = {
-            ['end'] = {
-              character = 19,
-              line = 7,
-            },
-            start = {
-              character = 19,
-              line = 7,
-            },
+            start = { line = 7, character = 19 },
+            ['end'] = { line = 7, character = 19 },
           },
         },
       },
       data = { id = 1 },
     },
     {
-      kind = 1,
       label = {
+        { value = ': ' },
         {
-          value = ': ',
-        },
-        {
-          location = {
-            range = {
-              ['end'] = {
-                character = 19,
-                line = 0,
-              },
-              start = {
-                character = 11,
-                line = 0,
-              },
-            },
-            uri = mocked_files.lib.uri,
-          },
-          tooltip = 'string tooltip',
           value = 'MyStruct',
+          location = lib_location,
+          tooltip = 'string tooltip',
         },
       },
       tooltip = { kind = 'plaintext', value = 'plaintext markup tooltip' },
-      paddingLeft = false,
-      paddingRight = false,
-      position = {
-        character = 19,
-        line = 8,
-      },
+      position = { line = 8, character = 19 },
       textEdits = {
         {
           newText = ': MyStruct',
           range = {
-            ['end'] = {
-              character = 19,
-              line = 8,
-            },
-            start = {
-              character = 19,
-              line = 8,
-            },
+            start = { line = 8, character = 19 },
+            ['end'] = { line = 8, character = 19 },
           },
         },
       },
       data = { id = 2 },
     },
     {
-      kind = 2,
-      label = {
-        {
-          value = 'data:',
-        },
-      },
-      paddingLeft = false,
-      paddingRight = true,
-      position = {
-        character = 22,
-        line = 9,
-      },
+      label = { { value = 'data:' } },
+      position = { line = 9, character = 22 },
       data = { id = 3 },
     },
   }
 
-  -- this is taken from basedpyright
+  --- The hints as initially returned by `textDocument/inlayHint` (this shape is taken from
+  --- basedpyright): hint 1 only carries its location/command/tooltip/textEdits after
+  --- `inlayHint/resolve`.
   ---@type lsp.InlayHint[]
-  local orig_response = {
-    {
-      kind = 1,
-      label = {
-        {
-          value = ': ',
-        },
-        {
-          value = 'MyStruct',
-        },
-      },
-      paddingLeft = false,
-      paddingRight = false,
-      position = {
-        character = 19,
-        line = 7,
-      },
-      data = { id = 1 },
-    },
-    {
-      kind = 1,
-      label = {
-        {
-          value = ': ',
-        },
-        {
-          location = {
-            range = {
-              ['end'] = {
-                character = 19,
-                line = 0,
-              },
-              start = {
-                character = 11,
-                line = 0,
-              },
-            },
-            uri = mocked_files.lib.uri,
-          },
-          tooltip = 'string tooltip',
-          value = 'MyStruct',
-        },
-      },
-      tooltip = { kind = 'plaintext', value = 'plaintext markup tooltip' },
-      paddingLeft = false,
-      paddingRight = false,
-      position = {
-        character = 19,
-        line = 8,
-      },
-      textEdits = {
-        {
-          newText = ': MyStruct',
-          range = {
-            ['end'] = {
-              character = 19,
-              line = 8,
-            },
-            start = {
-              character = 19,
-              line = 8,
-            },
-          },
-        },
-      },
-      data = { id = 2 },
-    },
-    {
-      kind = 2,
-      label = {
-        {
-          value = 'data:',
-        },
-      },
-      paddingLeft = false,
-      paddingRight = true,
-      position = {
-        character = 22,
-        line = 9,
-      },
-      data = { id = 3 },
-    },
-  }
+  local orig_response = vim.deepcopy(resolved_response)
+  orig_response[1].label[2] = { value = 'MyStruct' }
+  orig_response[1].tooltip = nil
+  orig_response[1].textEdits = nil
 
   local curr_winid ---@type integer?
   local offset_encoding = 'utf-8'
   local client_id ---@type integer?
 
-  -- set a large wait time so that the async operations have time to complete
-  -- in practice, the `vim.wait` calls should use a callback to make the wait stop early.
-  local wait_time = 1000000
+  -- Upper bound for the `vim.wait` calls; they all use a condition to stop early.
+  local wait_time = 5000
+
   before_each(function()
     clear_notrace()
 
@@ -724,26 +646,11 @@ describe('vim.lsp.inlay_hint.action', function()
     end)
 
     exec_lua(function()
-      ---@param start_pos [integer, integer]
-      ---@param end_pos [integer, integer]
-      ---@param bufnr integer?
-      ---@return vim.lsp.inlay_hint.get.ret[]
-      _G.get_hints_from_range = function(start_pos, end_pos, bufnr)
-        return vim.lsp.inlay_hint.get({
-          bufnr = bufnr,
-          range = {
-            start = { line = start_pos[1], character = start_pos[2] },
-            ['end'] = { line = end_pos[1], character = end_pos[2] },
-          },
-        })
-      end
-    end)
-
-    exec_lua(function()
       _G.command_called = {}
       _G.server = _G._create_server({
         capabilities = {
           inlayHintProvider = { resolveProvider = true },
+          executeCommandProvider = { commands = { 'dummy_command' } },
         },
         handlers = {
           ['workspace/executeCommand'] = function(_, param, callback)
@@ -754,13 +661,15 @@ describe('vim.lsp.inlay_hint.action', function()
           ['textDocument/inlayHint'] = function(_, param, callback)
             local buf = vim.uri_to_bufnr(param.textDocument.uri)
             local requested_range = vim.range.lsp(buf, param.range, offset_encoding)
+            local range_start = vim.pos(buf, requested_range.start_row, requested_range.start_col)
+            local range_end = vim.pos(buf, requested_range.end_row, requested_range.end_col)
             local filtered_hints = vim
               .iter(orig_response)
               :filter(
                 ---@param hint lsp.InlayHint
                 function(hint)
                   local hint_pos = vim.pos.lsp(buf, hint.position, offset_encoding)
-                  return hint_pos >= requested_range.start and hint_pos < requested_range.end_
+                  return hint_pos >= range_start and hint_pos < range_end
                 end
               )
               :totable()
@@ -788,16 +697,7 @@ describe('vim.lsp.inlay_hint.action', function()
                   kind = 'markdown',
                   value = '\n```rust\ndummy\n```\n\n```rust\npub struct MyStruct {\n    pub value: i32,\n}\n```\n\n---\n\nsize = 4, align = 0x4',
                 },
-                range = {
-                  ['end'] = {
-                    character = 19,
-                    line = 0,
-                  },
-                  start = {
-                    character = 11,
-                    line = 0,
-                  },
-                },
+                range = lib_location.range,
               })
             else
               callback()
@@ -822,174 +722,80 @@ describe('vim.lsp.inlay_hint.action', function()
       vim.api.nvim_cmd({ cmd = 'buf', args = { tostring(mocked_files.main.bufnr) } }, {})
       curr_winid = vim.api.nvim_get_current_win()
     end)
+
+    setup_action_driver()
   end)
 
   after_each(function()
     api.nvim_exec_autocmds('VimLeavePre', { modeline = false })
   end)
 
-  it('should fetch hint in normal mode', function()
-    local done = false
-    assert(curr_winid)
-    local hint_count = exec_lua(function()
-      local hint_count ---@type integer?
-      vim.api.nvim_win_set_cursor(curr_winid, { 8, 18 })
-      vim.lsp.inlay_hint.action(function(hints, ctx, cb)
-        hint_count = #hints
-        if #hints > 0 then
-          cb({ bufnr = ctx.bufnr, client = ctx.client })
-        end
-        return hint_count
-      end, {}, function()
-        done = true
-      end)
-      vim.wait(wait_time, function()
-        return done
-      end)
-
-      assert(done)
-      return hint_count
-    end)
-
-    eq(1, hint_count)
-  end)
-
-  it('should fetch hints in visual mode', function()
-    assert(curr_winid)
-    local done = false
-    local fetched_hint_count = exec_lua(function()
-      vim.api.nvim_win_set_cursor(curr_winid, { 8, 0 })
-      vim.cmd.normal('v')
-      vim.api.nvim_win_set_cursor(curr_winid, { 9, 30 })
-
-      local hint_count ---@type integer?
-      vim.lsp.inlay_hint.action(function(_hints, ctx, cb)
-        hint_count = #_hints
-        if #_hints > 0 then
-          cb({ bufnr = ctx.bufnr, client = ctx.client })
-        end
-        return hint_count
-      end, {}, function()
-        done = true
-      end)
-      vim.wait(wait_time, function()
-        return done
-      end)
-      assert(done)
-      return hint_count
-    end)
-
-    eq(2, fetched_hint_count)
-  end)
-
-  it('should exit when providing no hints', function()
-    local done = false
-    assert(curr_winid)
-    ---@type table
-    local ctx = exec_lua(function()
-      vim.api.nvim_win_set_cursor(curr_winid, { 8, 18 })
-      local on_finish_ctx ---@type table?
-      vim.lsp.inlay_hint.action(function()
-        return 0
-      end, { hints = {} }, function(ctx)
-        on_finish_ctx = ctx
-        done = true
-      end)
-      vim.wait(wait_time, function()
-        return done
-      end)
-
-      assert(done)
-      return on_finish_ctx or { client = true } -- `on_finish_ctx` should be set to the actual ctx, and `client` should be `nil`
-    end)
-
-    eq(nil, ctx.client)
-  end)
-
-  describe('textEdits', function()
-    before_each(function()
-      exec_lua(function()
-        ---@param start_pos [integer, integer]
-        ---@param end_pos [integer, integer]
-        ---@return {bufnr: integer, lines: string[]}
-        _G.apply_edits = function(start_pos, end_pos)
-          local done = false
-
-          vim.lsp.inlay_hint.action('textEdits', {
-            hints = _G.get_hints_from_range(start_pos, end_pos, mocked_files.main.bufnr),
-          }, function(_)
-            done = true
-          end)
-          vim.wait(wait_time, function()
-            return done
-          end)
-          local bufnr = vim.api.nvim_get_current_buf()
-          return { bufnr = bufnr, lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false) }
-        end
-      end)
-    end)
-
-    it('should insert textEdits', function()
-      local post_edit = exec_lua(function()
-        return _G.apply_edits({ 7, 18 }, { 8, 20 })
-      end)
-
-      eq('let my_instance: MyStruct = MyStruct::new(42);', vim.trim(post_edit.lines[8]))
-      eq('let _MyInstance: MyStruct = MyStruct::new(43);', vim.trim(post_edit.lines[9]))
-    end)
-
-    it("should NOT insert when there's no textEdits", function()
-      eq(
-        mocked_files.main.lines,
-        exec_lua(function()
-          return _G.apply_edits({ 9, 18 }, { 9, 20 })
-        end).lines
+  --- Runs the named action on the hints in the given range of the main file.
+  --- @param action vim.lsp.inlay_hint.action.name
+  --- @param start_pos [integer, integer] 0-indexed (line, character) LSP position
+  --- @param end_pos [integer, integer] 0-indexed (line, character) LSP position
+  --- @return {buf: integer, client_id: integer?, win: integer?, lines: string[]?}
+  local function run_action(action, start_pos, end_pos)
+    return exec_lua(function()
+      return _G.run_inlay_action(
+        action,
+        vim.lsp.inlay_hint.get({
+          bufnr = mocked_files.main.bufnr,
+          range = {
+            start = { line = start_pos[1], character = start_pos[2] },
+            ['end'] = { line = end_pos[1], character = end_pos[2] },
+          },
+        })
       )
     end)
+  end
+
+  --- Counts the hints `action()` picks up from the cursor at `from`, or from the charwise
+  --- selection between `from` and `to`.
+  --- @param from [integer, integer] (1,0)-indexed cursor position
+  --- @param to? [integer, integer] (1,0)-indexed end of the visual selection
+  --- @return integer
+  local function count_selected_hints(from, to)
+    return exec_lua(function()
+      vim.api.nvim_win_set_cursor(curr_winid, from)
+      if to then
+        vim.cmd.normal('v')
+        vim.api.nvim_win_set_cursor(curr_winid, to)
+      end
+      local count ---@type integer?
+      _G.run_inlay_action(_G.capture_hints(function(hints)
+        count = #hints
+      end))
+      return assert(count)
+    end)
+  end
+
+  it('selects hints from the cursor, or from the visual selection', function()
+    eq(1, count_selected_hints({ 8, 18 }))
+    eq(2, count_selected_hints({ 8, 0 }, { 9, 30 }))
   end)
 
-  describe('location', function()
-    before_each(function()
-      exec_lua(function()
-        ---@param start_pos [integer, integer]
-        ---@param end_pos [integer, integer]
-        ---@return {bufnr: integer}
-        _G.jump_to_location = function(start_pos, end_pos)
-          local done = false
-          vim.lsp.inlay_hint.action('location', {
-            hints = _G.get_hints_from_range(start_pos, end_pos, mocked_files.main.bufnr),
-          }, function(_)
-            done = true
-          end)
-          vim.wait(wait_time, function()
-            return done
-          end)
-          return { bufnr = vim.api.nvim_get_current_buf() }
-        end
-      end)
-    end)
-
-    it('should jump when location is provided', function()
-      eq(
-        mocked_files.lib.bufnr,
-        exec_lua(function()
-          return _G.jump_to_location({ 7, 18 }, { 7, 20 })
-        end).bufnr
-      )
-    end)
-
-    it('should NOT jump when location is not provided', function()
-      eq(
-        mocked_files.main.bufnr,
-        exec_lua(function()
-          return _G.jump_to_location({ 9, 21 }, { 9, 24 })
-        end).bufnr
-      )
-    end)
+  it('textEdits inserts the edits of every selected hint', function()
+    local result = run_action('textEdits', { 7, 18 }, { 8, 20 })
+    eq('let my_instance: MyStruct = MyStruct::new(42);', vim.trim(result.lines[8]))
+    eq('let _MyInstance: MyStruct = MyStruct::new(43);', vim.trim(result.lines[9]))
   end)
 
-  describe('tooltip', function()
-    local ref_tooltip = {
+  it('location jumps to the label location', function()
+    eq(mocked_files.lib.bufnr, run_action('location', { 7, 18 }, { 7, 20 }).buf)
+  end)
+
+  it('tooltip shows the tooltips, location and command in a floating window', function()
+    -- The path in the tooltip is rendered relative to the client root (unset here), falling
+    -- back to the full path, so it depends on the platform.
+    local lib_path = exec_lua(function()
+      return vim.fn.fnamemodify(vim.uri_to_fname(mocked_files.lib.uri), ':p:~')
+    end)
+
+    local result = run_action('tooltip', { 7, 18 }, { 7, 20 })
+    neq(mocked_files.main.bufnr, result.buf)
+    neq(curr_winid, result.win)
+    eq({
       '# `: MyStruct`',
       '',
       'plaintext markup tooltip',
@@ -997,61 +803,16 @@ describe('vim.lsp.inlay_hint.action', function()
       '## `MyStruct`',
       '',
       'string tooltip',
-      '_Location_: `/src/lib.rs`:0',
+      ('_Location_: `%s`:0'):format(lib_path),
       '_Command_: Dummy command',
-    }
-
-    before_each(function()
-      exec_lua(function()
-        ---@param start_pos [integer, integer]
-        ---@param end_pos [integer, integer]
-        ---@return {bufnr: integer, winid: integer, lines: string[]}
-        _G.get_tooltip = function(start_pos, end_pos)
-          assert(curr_winid)
-          local done = false
-          local tooltip_buf = nil ---@type integer?
-          local tooltip_win = nil ---@type integer?
-          vim.lsp.inlay_hint.action('tooltip', {
-            hints = _G.get_hints_from_range(start_pos, end_pos, mocked_files.main.bufnr),
-          }, function(ctx)
-            tooltip_buf = ctx.bufnr
-            tooltip_win = vim.fn.bufwinid(tooltip_buf)
-            done = true
-          end)
-          vim.wait(wait_time, function()
-            return done
-          end)
-          assert(done)
-
-          local tooltip_lines = vim.api.nvim_buf_get_lines(tooltip_buf or 0, 0, -1, false)
-
-          return { bufnr = tooltip_buf, winid = tooltip_win, lines = tooltip_lines }
-        end
-      end)
-    end)
-
-    it('should show tooltip when available', function()
-      local tooltip_info = exec_lua(function()
-        return _G.get_tooltip({ 7, 18 }, { 7, 20 })
-      end)
-
-      neq(mocked_files.main.bufnr, tooltip_info.bufnr)
-      neq(curr_winid, tooltip_info.winid)
-
-      eq(ref_tooltip, tooltip_info.lines)
-    end)
-
-    it('should NOT show tooltip when not available', function()
-      local buf_count = #api.nvim_list_bufs()
-      exec_lua(function()
-        _G.get_tooltip({ 9, 21 }, { 9, 24 })
-      end)
-      eq(buf_count, #api.nvim_list_bufs())
-    end)
+    }, result.lines)
   end)
 
-  describe('hover', function()
-    local ref_hover = {
+  it('hover shows hover info of the label location in a floating window', function()
+    local result = run_action('hover', { 7, 18 }, { 7, 20 })
+    neq(mocked_files.main.bufnr, result.buf)
+    neq(curr_winid, result.win)
+    eq({
       '# `MyStruct`',
       '```rust',
       'dummy',
@@ -1066,103 +827,638 @@ describe('vim.lsp.inlay_hint.action', function()
       '---',
       '',
       'size = 4, align = 0x4',
-    }
-
-    before_each(function()
-      exec_lua(function()
-        ---@param start_pos [integer, integer]
-        ---@param end_pos [integer, integer]
-        ---@return {bufnr: integer, winid: integer, lines: string[]}
-        _G.get_hover_info = function(start_pos, end_pos)
-          assert(curr_winid)
-          local done = false
-          local hover_buf = nil ---@type integer?
-          local hover_win = nil ---@type integer?
-          vim.lsp.inlay_hint.action('hover', {
-            hints = _G.get_hints_from_range(start_pos, end_pos, mocked_files.main.bufnr),
-          }, function(ctx)
-            hover_buf = ctx.bufnr
-            hover_win = vim.fn.bufwinid(hover_buf)
-            done = true
-          end)
-          vim.wait(wait_time, function()
-            return done
-          end)
-          assert(done)
-
-          local hover_lines = vim.api.nvim_buf_get_lines(hover_buf or 0, 0, -1, false)
-
-          return { bufnr = hover_buf, winid = hover_win, lines = hover_lines }
-        end
-      end)
-    end)
-
-    it('should show hover when available', function()
-      local hover_info = exec_lua(function()
-        return _G.get_hover_info({ 7, 18 }, { 7, 20 })
-      end)
-
-      neq(mocked_files.main.bufnr, hover_info.bufnr)
-      neq(curr_winid, hover_info.winid)
-
-      eq(ref_hover, hover_info.lines)
-    end)
-
-    it('should deduplicate same locations', function()
-      -- this test whether `action_helpers.add_new_label` is correctly avoiding
-      -- duplicated locations.
-      local hover_info = exec_lua(function()
-        return _G.get_hover_info({ 7, 18 }, { 8, 20 })
-      end)
-
-      neq(mocked_files.main.bufnr, hover_info.bufnr)
-      neq(curr_winid, hover_info.winid)
-
-      eq(ref_hover, hover_info.lines)
-    end)
-
-    it('should NOT show hover when not available', function()
-      local buf_count = #api.nvim_list_bufs()
-      exec_lua(function()
-        _G.get_hover_info({ 9, 21 }, { 9, 24 })
-      end)
-
-      eq(buf_count, #api.nvim_list_bufs())
-    end)
+    }, result.lines)
   end)
 
-  describe('command', function()
-    before_each(function()
-      exec_lua(function()
-        _G.get_command_called = function(start_pos, end_pos)
-          local done = false
-          vim.lsp.inlay_hint.action('command', {
-            hints = _G.get_hints_from_range(start_pos, end_pos, mocked_files.main.bufnr),
-          }, function(_)
-            done = true
-          end)
-          vim.wait(wait_time, function()
-            return done
-          end)
-          assert(done)
-          return _G.command_called
-        end
-      end)
-    end)
-
-    it('execute command when available', function()
-      local command_called = exec_lua(function()
-        return _G.get_command_called({ 7, 18 }, { 7, 20 })
-      end)
-      eq(1, #command_called)
-    end)
-
-    it('should NOT execute command when not available', function()
-      local command_called = exec_lua(function()
-        return _G.get_command_called({ 9, 21 }, { 9, 24 })
-      end)
-
-      eq(0, #command_called)
-    end)
+  it('command executes the label command', function()
+    run_action('command', { 7, 18 }, { 7, 20 })
+    eq(1, exec_lua('return #_G.command_called'))
   end)
+
+  -- The hint on line 9 carries a bare label and nothing else, so no action applies to it.
+  it('takes no action on a hint without the needed attributes', function()
+    local buf_count = #api.nvim_list_bufs()
+    for _, action in ipairs({ 'textEdits', 'location', 'tooltip', 'hover', 'command' }) do
+      local result = run_action(action, { 9, 21 }, { 9, 24 })
+      -- No jump, no float, and nothing inserted.
+      eq(mocked_files.main.bufnr, result.buf, action)
+      eq(mocked_files.main.lines, result.lines, action)
+      eq(nil, result.client_id, action)
+    end
+    eq(buf_count, #api.nvim_list_bufs())
+    eq(0, exec_lua('return #_G.command_called'))
+  end)
+end)
+
+describe('vim.lsp.inlay_hint.action edge cases', function()
+  before_each(function()
+    clear_notrace()
+    exec_lua(create_server_definition)
+    exec_lua(function()
+      vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'abc' })
+
+      function _G.start_hint_client(capabilities, handlers)
+        handlers = handlers or {}
+        handlers['textDocument/inlayHint'] = handlers['textDocument/inlayHint']
+          or function(_, _, cb)
+            cb(nil, {})
+          end
+        local server = _G._create_server({
+          capabilities = capabilities or { inlayHintProvider = true },
+          handlers = handlers,
+        })
+        local id = assert(vim.lsp.start({ name = 'hints', cmd = server.cmd }, {
+          reuse_client = function()
+            return false
+          end,
+        }))
+        local client = assert(vim.lsp.get_client_by_id(id))
+        assert(vim.wait(1000, function()
+          return client.initialized
+        end))
+        return client, server
+      end
+
+      function _G.hint_entry(client, hint, buf)
+        return {
+          bufnr = buf or vim.api.nvim_get_current_buf(),
+          client_id = client.id,
+          inlay_hint = vim.tbl_extend('force', {
+            label = 'T',
+            position = { line = 0, character = 1 },
+          }, hint or {}),
+        }
+      end
+
+      function _G.label_loc(buf)
+        return {
+          uri = vim.uri_from_bufnr(buf or 0),
+          range = { start = { line = 0, character = 0 }, ['end'] = { line = 0, character = 1 } },
+        }
+      end
+    end)
+
+    setup_action_driver()
+  end)
+
+  after_each(function()
+    api.nvim_exec_autocmds('VimLeavePre', { modeline = false })
+  end)
+
+  it('finishes asynchronously with no hints', function()
+    eq(
+      { api.nvim_get_current_buf(), true },
+      exec_lua(function()
+        local result = run_inlay_action('textEdits', {})
+        return { result.buf, result.client_id == nil }
+      end)
+    )
+  end)
+
+  it('always supplies custom handlers with a completion function', function()
+    eq(
+      true,
+      exec_lua(function()
+        local client = start_hint_client()
+        local called = false
+        vim.lsp.inlay_hint.action(function(_, ctx, done)
+          done(ctx)
+          called = true
+          return true
+        end, { hints = { hint_entry(client) } })
+        return vim.wait(1000, function()
+          return called
+        end)
+      end)
+    )
+  end)
+
+  it('tries clients in ID order and stops at the first handled action', function()
+    eq(
+      { { 1, 2 }, 2 },
+      exec_lua(function()
+        local first, second, third = start_hint_client(), start_hint_client(), start_hint_client()
+        local seen = {}
+        local result = run_inlay_action(function(_, ctx, done)
+          seen[#seen + 1] = ctx.client.id
+          if ctx.client.id == first.id then
+            return false
+          end
+          done(ctx)
+          return true
+        end, { hint_entry(third), hint_entry(second), hint_entry(first) })
+        return { seen, result.client_id }
+      end)
+    )
+  end)
+
+  it('applies supplied edits to their source buffer without resolving again', function()
+    eq(
+      { 'aXbc', 'other', true },
+      exec_lua(function()
+        local client = start_hint_client({ inlayHintProvider = { resolveProvider = true } }, {
+          ['inlayHint/resolve'] = function()
+            error('unexpected resolve')
+          end,
+        })
+        local source = vim.api.nvim_get_current_buf()
+        local entry = hint_entry(client, {
+          textEdits = {
+            {
+              newText = 'X',
+              range = {
+                start = { line = 0, character = 1 },
+                ['end'] = { line = 0, character = 1 },
+              },
+            },
+          },
+        })
+        local other = vim.api.nvim_create_buf(true, false)
+        vim.api.nvim_set_current_buf(other)
+        vim.api.nvim_buf_set_lines(other, 0, -1, false, { 'other' })
+        local result = run_inlay_action('textEdits', { entry })
+        return {
+          vim.api.nvim_buf_get_lines(source, 0, -1, false)[1],
+          vim.api.nvim_get_current_line(),
+          result.buf == source and result.client_id == client.id,
+        }
+      end)
+    )
+  end)
+
+  it('rejects mixed-buffer hints before invoking a handler', function()
+    eq(
+      { false, true, false },
+      exec_lua(function()
+        local client = start_hint_client()
+        local called = false
+        local ok, err = pcall(vim.lsp.inlay_hint.action, function()
+          called = true
+          return true
+        end, {
+          hints = {
+            hint_entry(client),
+            hint_entry(client, {}, vim.api.nvim_create_buf(true, false)),
+          },
+        })
+        vim.wait(0)
+        return { ok, tostring(err):find('same buffer', 1, true) ~= nil, called }
+      end)
+    )
+  end)
+
+  it('converts cached positions for UTF-16 resolution without mutating them', function()
+    eq(
+      { 3, 6, 6 },
+      exec_lua(function()
+        vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'é😀x' })
+        local sent
+        start_hint_client({
+          positionEncoding = 'utf-16',
+          inlayHintProvider = { resolveProvider = true },
+        }, {
+          ['textDocument/inlayHint'] = function(_, _, cb)
+            cb(nil, { { label = 'T', position = { line = 0, character = 3 } } })
+          end,
+          ['inlayHint/resolve'] = function(_, params, cb)
+            sent = params.position.character
+            cb(nil, params)
+          end,
+        })
+        vim.lsp.inlay_hint.enable(true)
+        assert(vim.wait(1000, function()
+          return #vim.lsp.inlay_hint.get({ bufnr = 0 }) == 1
+        end))
+        local hints = vim.lsp.inlay_hint.get({ bufnr = 0 })
+        local received
+        run_inlay_action(
+          capture_hints(function(resolved)
+            received = resolved[1].position.character
+          end),
+          hints
+        )
+        return { sent, received, hints[1].inlay_hint.position.character }
+      end)
+    )
+  end)
+
+  it('retains hint order when resolve responses arrive in reverse order', function()
+    eq(
+      { 'first', 'second' },
+      exec_lua(function()
+        local pending = {}
+        local client = start_hint_client({ inlayHintProvider = { resolveProvider = true } }, {
+          ['inlayHint/resolve'] = function(_, params, cb)
+            pending[#pending + 1] = function()
+              cb(nil, params)
+            end
+          end,
+        })
+        local labels
+        run_inlay_action(
+          capture_hints(function(hints)
+            labels = { hints[1].label, hints[2].label }
+          end),
+          { hint_entry(client, { label = 'first' }), hint_entry(client, { label = 'second' }) },
+          function()
+            assert(vim.wait(1000, function()
+              return #pending == 2
+            end))
+            pending[2]()
+            pending[1]()
+          end
+        )
+        return labels
+      end)
+    )
+  end)
+
+  for _, change in ipairs({ 'edit', 'delete' }) do
+    it('abandons resolved edits after a buffer ' .. change, function()
+      eq(
+        { false, true },
+        exec_lua(function()
+          local reply
+          local client = start_hint_client({ inlayHintProvider = { resolveProvider = true } }, {
+            ['inlayHint/resolve'] = function(_, _, cb)
+              reply = cb
+            end,
+          })
+          local buf = vim.api.nvim_get_current_buf()
+          local result = run_inlay_action('textEdits', { hint_entry(client) }, function()
+            assert(vim.wait(1000, function()
+              return reply ~= nil
+            end))
+            if change == 'edit' then
+              vim.api.nvim_buf_set_lines(buf, 0, -1, false, { 'ZZabc' })
+            else
+              vim.api.nvim_buf_delete(buf, { force = true })
+            end
+            reply(nil, {
+              textEdits = {
+                {
+                  newText = 'X',
+                  range = {
+                    start = { line = 0, character = 1 },
+                    ['end'] = { line = 0, character = 1 },
+                  },
+                },
+              },
+            })
+          end)
+          return {
+            result.client_id ~= nil,
+            result.buf == buf
+              and (
+                change == 'delete' or vim.api.nvim_buf_get_lines(buf, 0, -1, false)[1] == 'ZZabc'
+              ),
+          }
+        end)
+      )
+    end)
+  end
+
+  it('rechecks the buffer before applying scheduled text edits', function()
+    eq(
+      { 'changed', false },
+      exec_lua(function()
+        local client = start_hint_client({ inlayHintProvider = { resolveProvider = true } }, {
+          ['inlayHint/resolve'] = function(_, params, cb)
+            params.textEdits = {
+              { newText = 'X', range = { start = params.position, ['end'] = params.position } },
+            }
+            cb(nil, params)
+            -- The response scheduled the edit, but it has not run yet.
+            vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'changed' })
+          end,
+        })
+        local result = run_inlay_action('textEdits', { hint_entry(client) })
+        return { vim.api.nvim_get_current_line(), result.client_id ~= nil }
+      end)
+    )
+  end)
+
+  for _, case in ipairs({
+    { 'inlayHint/resolve', 'textEdits' },
+    { 'textDocument/hover', 'hover' },
+    { 'workspace/executeCommand', 'command' },
+  }) do
+    local method, action = case[1], case[2]
+    it('completes when submitting ' .. method .. ' fails', function()
+      eq(
+        false,
+        exec_lua(function()
+          local client = start_hint_client({
+            inlayHintProvider = { resolveProvider = method == 'inlayHint/resolve' },
+            executeCommandProvider = { commands = { 'test' } },
+          })
+          client.rpc.request = function()
+            return false
+          end
+          local loc = label_loc()
+          local result = run_inlay_action(action, {
+            hint_entry(client, {
+              label = {
+                { value = 'T', location = loc, command = { title = 'Test', command = 'test' } },
+              },
+            }),
+          })
+          return result.client_id ~= nil
+        end)
+      )
+    end)
+  end
+
+  it('falls back to another client after a resolve error', function()
+    eq(
+      2,
+      exec_lua(function()
+        local first = start_hint_client({ inlayHintProvider = { resolveProvider = true } }, {
+          ['inlayHint/resolve'] = function(_, _, cb)
+            cb({ code = -32603, message = 'failed' })
+          end,
+        })
+        local second = start_hint_client()
+        local result = run_inlay_action('tooltip', {
+          hint_entry(first),
+          hint_entry(second, { tooltip = 'docs' }),
+        })
+        return result.client_id
+      end)
+    )
+  end)
+
+  for _, action in ipairs({ 'location', 'command' }) do
+    it('finishes without a client when ' .. action .. ' selection is cancelled', function()
+      eq(
+        { true, false, true },
+        exec_lua(function()
+          local client = start_hint_client()
+          local buf = vim.api.nvim_get_current_buf()
+          local selected = false
+          vim.ui.select = function(items, _, cb)
+            assert(#items == 2)
+            selected = true
+            cb(nil, nil)
+          end
+          local loc = label_loc(buf)
+          local result = run_inlay_action(action, {
+            hint_entry(client, {
+              label = {
+                { value = 'A', location = loc, command = { title = 'A', command = 'a' } },
+                { value = 'B', location = loc, command = { title = 'B', command = 'b' } },
+              },
+            }),
+          })
+          return { selected, result.client_id ~= nil, result.buf == buf }
+        end)
+      )
+    end)
+  end
+
+  it('deduplicates identical label locations within a hint', function()
+    eq(
+      { '# `T`', 'docs' },
+      exec_lua(function()
+        local client = start_hint_client(nil, {
+          ['textDocument/hover'] = function(_, _, cb)
+            cb(nil, { contents = { kind = 'markdown', value = 'docs' } })
+          end,
+        })
+        local loc = label_loc()
+        local result = run_inlay_action('hover', {
+          hint_entry(client, {
+            label = { { value = 'T', location = loc }, { value = 'T', location = loc } },
+          }),
+        })
+        return result.lines
+      end)
+    )
+  end)
+
+  it('preserves distinct label-only tooltips', function()
+    eq(
+      { '# `TT`', '', '', '## `T`', '', 'first', '', '## `T`', '', 'second' },
+      exec_lua(function()
+        local client = start_hint_client()
+        local result = run_inlay_action('tooltip', {
+          hint_entry(client, {
+            label = {
+              { value = 'T', tooltip = 'first' },
+              { value = 'T', tooltip = 'second' },
+            },
+          }),
+        })
+        return vim.api.nvim_buf_get_lines(result.buf, 0, -1, false)
+      end)
+    )
+  end)
+
+  it('does not open a hover window for an empty response', function()
+    eq(
+      { true, false },
+      exec_lua(function()
+        local client = start_hint_client(nil, {
+          ['textDocument/hover'] = function(_, _, cb)
+            cb(nil, nil)
+          end,
+        })
+        local buf = vim.api.nvim_get_current_buf()
+        local loc = label_loc(buf)
+        local entry = hint_entry(client, { label = { { value = 'T', location = loc } } })
+        local windows = #vim.api.nvim_list_wins()
+        local result = run_inlay_action('hover', { entry })
+        return {
+          result.buf == buf and #vim.api.nvim_list_wins() == windows,
+          result.client_id ~= nil,
+        }
+      end)
+    )
+  end)
+
+  it('focuses an existing target window when jumping to a location', function()
+    eq(
+      true,
+      exec_lua(function()
+        local client = start_hint_client()
+        local source_win = vim.api.nvim_get_current_win()
+        vim.cmd.vnew()
+        local target_win = vim.api.nvim_get_current_win()
+        local target_buf = vim.api.nvim_get_current_buf()
+        vim.api.nvim_buf_set_name(target_buf, 'Xhint_target')
+        vim.api.nvim_buf_set_lines(target_buf, 0, -1, false, { 'target' })
+        vim.api.nvim_set_current_win(source_win)
+        local loc = label_loc(target_buf)
+        local entry = hint_entry(client, { label = { { value = 'T', location = loc } } })
+        local result = run_inlay_action('location', { entry })
+        return result.buf == target_buf and vim.api.nvim_get_current_win() == target_win
+      end)
+    )
+  end)
+
+  for _, outcome in ipairs({ 'result', 'error' }) do
+    it('completes a server command with a server ' .. outcome, function()
+      eq(
+        { { command = 'test', arguments = { 42 } }, outcome == 'result' },
+        exec_lua(function()
+          local failed = outcome == 'error'
+          local sent
+          local client = start_hint_client({
+            inlayHintProvider = true,
+            executeCommandProvider = { commands = { 'test' } },
+          }, {
+            ['workspace/executeCommand'] = function(_, params, cb)
+              sent = params
+              cb(failed and { code = -32603, message = 'failed' } or nil, nil)
+            end,
+          })
+          local handled = false
+          client.handlers['workspace/executeCommand'] = function(err)
+            assert((err ~= nil) == failed)
+            handled = true
+          end
+          local entry = hint_entry(client, {
+            label = {
+              { value = 'T', command = { title = 'Test', command = 'test', arguments = { 42 } } },
+            },
+          })
+          local result = run_inlay_action('command', { entry })
+          assert(handled)
+          return { sent, result.client_id ~= nil }
+        end)
+      )
+    end)
+  end
+
+  for _, scope in ipairs({ 'client', 'global' }) do
+    it('executes ' .. scope .. '-side commands locally', function()
+      eq(
+        { true, true },
+        exec_lua(function()
+          local client = start_hint_client()
+          local called = false
+          local commands = scope == 'client' and client.commands or vim.lsp.commands
+          commands.test = function(cmd, ctx)
+            assert(cmd.arguments[1] == 42 and ctx.bufnr == vim.api.nvim_get_current_buf())
+            called = true
+          end
+          client.rpc.request = function()
+            error('unexpected server request')
+          end
+          local result = run_inlay_action('command', {
+            hint_entry(client, {
+              label = {
+                {
+                  value = 'T',
+                  command = { title = 'Test', command = 'test', arguments = { 42 } },
+                },
+              },
+            }),
+          })
+          return { called, result.client_id == client.id }
+        end)
+      )
+    end)
+  end
+
+  it('finishes unsupported commands without sending a server request', function()
+    eq(
+      { true, false },
+      exec_lua(function()
+        local client = start_hint_client()
+        local notified = false
+        vim.notify_once = function()
+          notified = true
+        end
+        client.rpc.request = function()
+          error('unexpected server request')
+        end
+        local result = run_inlay_action('command', {
+          hint_entry(client, {
+            label = {
+              { value = 'T', command = { title = 'Test', command = 'test' } },
+            },
+          }),
+        })
+        return { notified, result.client_id ~= nil }
+      end)
+    )
+  end)
+
+  it('uses the cursor of the invoking window', function()
+    eq(
+      'second',
+      exec_lua(function()
+        vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'aaa', 'bbb' })
+        start_hint_client(nil, {
+          ['textDocument/inlayHint'] = function(_, _, cb)
+            cb(nil, {
+              { label = 'first', position = { line = 0, character = 1 } },
+              { label = 'second', position = { line = 1, character = 1 } },
+            })
+          end,
+        })
+        vim.lsp.inlay_hint.enable(true)
+        assert(vim.wait(1000, function()
+          return #vim.lsp.inlay_hint.get({ bufnr = 0 }) == 2
+        end))
+        vim.cmd.vsplit()
+        local wins = vim.api.nvim_tabpage_list_wins(0)
+        vim.api.nvim_win_set_cursor(wins[1], { 1, 0 })
+        vim.api.nvim_win_set_cursor(wins[2], { 2, 0 })
+        vim.api.nvim_set_current_win(wins[2])
+        local label
+        run_inlay_action(capture_hints(function(hints)
+          label = hints[1].label
+        end))
+        return label
+      end)
+    )
+  end)
+
+  for _, case in ipairs({
+    { 'normal', '' },
+    { 'characterwise', 'v' },
+    { 'linewise', 'V' },
+    { 'blockwise', '\22j' },
+    { 'exclusive', 'vj0' },
+  }) do
+    local mode, keys = case[1], case[2]
+    it('selects multibyte hint boundaries in ' .. mode .. ' mode', function()
+      local expected = mode == 'blockwise' and { 'left', 'right', 'next' } or { 'left', 'right' }
+      eq(
+        expected,
+        exec_lua(function()
+          vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'é', 'abc' })
+          start_hint_client({ positionEncoding = 'utf-16', inlayHintProvider = true }, {
+            ['textDocument/inlayHint'] = function(_, _, cb)
+              cb(nil, {
+                { label = 'left', position = { line = 0, character = 0 } },
+                { label = 'right', position = { line = 0, character = 1 } },
+                { label = 'next', position = { line = 1, character = 0 } },
+              })
+            end,
+          })
+          vim.lsp.inlay_hint.enable(true)
+          assert(vim.wait(1000, function()
+            return #vim.lsp.inlay_hint.get({ bufnr = 0 }) == 3
+          end))
+          vim.api.nvim_win_set_cursor(0, { 1, 0 })
+          if mode == 'exclusive' then
+            vim.o.selection = 'exclusive'
+          end
+          if keys ~= '' then
+            vim.cmd.normal(keys)
+          end
+          local labels
+          run_inlay_action(capture_hints(function(hints)
+            labels = vim.tbl_map(function(h)
+              return h.label
+            end, hints)
+          end))
+          return labels
+        end)
+      )
+    end)
+  end
 end)
