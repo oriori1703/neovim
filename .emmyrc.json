@@ -10,6 +10,7 @@
     ],
     "ignoreGlobs": [
       "**/example_init.lua",
+      "**/lua/vim/re.lua",
       "test/**/fixtures/**"
     ],
     "preloadFileSize": 1000
@@ -26,14 +27,8 @@
   },
   "diagnostics": {
     "disable": [
-      "annotation-usage-error",
-      "assign-type-mismatch",
-      "code-style-check",
       "incomplete-signature-doc",
       "iter-variable-reassign",
-      "need-check-nil",
-      "param-type-mismatch",
-      "unnecessary-assert",
       "unnecessary-if"
     ],
     "severity": {
@@ -45,6 +40,7 @@
       "unused": "warning"
     },
     "enables": [
+      "code-style-check",
       "missing-global-doc",
       "non-literal-expressions-in-assert",
       "unknown-doc-tag"

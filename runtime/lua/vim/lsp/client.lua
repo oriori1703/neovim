@@ -222,7 +222,7 @@ end
 --- for an active request, or "cancel" for a cancel request. It will be
 --- "complete" ephemerally while executing |LspRequest| autocmds when replies
 --- are received from the server.
---- @field requests table<integer,{ type: string, bufnr: integer, method: string}?>
+--- @field requests table<integer,{ type: string, bufnr: integer, method: vim.lsp.protocol.Method}?>
 ---
 --- See [vim.lsp.ClientConfig].
 --- @field root_dir string?
@@ -232,7 +232,7 @@ end
 --- @field rpc vim.lsp.rpc.Client
 ---
 --- Response from the server sent on `initialize` describing the server's capabilities.
---- @field server_capabilities lsp.ServerCapabilities?
+--- @field server_capabilities lsp.ServerCapabilities
 ---
 --- Response from the server sent on `initialize` describing server information (e.g. version).
 --- @field server_info lsp.ServerInfo?
@@ -274,10 +274,10 @@ local Client = {}
 Client.__index = Client
 
 --- @param obj table<string,any>
---- @param cls table<string,function>
+--- @param cls table
 --- @param name string
 local function method_wrapper(obj, cls, name)
-  local meth = assert(cls[name])
+  local meth = assert(cls[name]) --[[@as function]]
   obj[name] = function(...)
     local arg = select(1, ...)
     if arg and getmetatable(arg) == cls then
@@ -379,7 +379,7 @@ local function validate_config(config)
   )
 end
 
---- @param trace string
+--- @param trace string?
 --- @return 'off'|'messages'|'verbose'
 local function get_trace(trace)
   local valid_traces = {
@@ -400,7 +400,7 @@ local function get_name(id, config)
   end
 
   if type(config.cmd) == 'table' and config.cmd[1] then
-    return assert(vim.fs.basename(config.cmd[1]))
+    return vim.fs.basename(config.cmd[1])
   end
 
   return tostring(id)
@@ -551,8 +551,9 @@ function Client:initialize()
 
   local root_uri --- @type string?
   local root_path --- @type string?
-  if self.workspace_folders then
-    root_uri = self.workspace_folders[1].uri
+  local workspace_folder = self.workspace_folders and self.workspace_folders[1]
+  if workspace_folder then
+    root_uri = workspace_folder.uri
     root_path = vim.uri_to_fname(root_uri)
   end
 
@@ -678,7 +679,7 @@ end
 --- Returns the handler associated with an LSP method.
 --- Returns the default handler if the user hasn't set a custom one.
 ---
---- @param method (vim.lsp.protocol.Method) LSP method name
+--- @param method string LSP method name
 --- @return lsp.Handler? handler for the given method, if defined, or the default from |vim.lsp.handlers|
 function Client:_resolve_handler(method)
   return self.handlers[method] or lsp.handlers[method]
@@ -796,7 +797,7 @@ local wait_result_reason = { [-1] = 'timeout', [-2] = 'interrupted', [-3] = 'err
 
 --- Concatenates and writes a list of strings to the Vim error buffer.
 ---
---- @param ... string List to write to the buffer
+--- @param ... string|number List to write to the buffer
 local function err_message(...)
   local chunks = { { table.concat(vim.iter({ ... }):flatten():totable()) } }
   if vim.in_fast_event() then
@@ -1033,7 +1034,7 @@ function Client:_register(registrations)
 end
 
 --- @private
---- @param unregistrations lsp.Unregistration[]
+--- @param unregistrations lsp.Unregistration[]|lsp.Registration[]
 function Client:_unregister_dynamic(unregistrations)
   for _, unreg in ipairs(unregistrations) do
     local provider = self:_registration_provider(unreg.method)
@@ -1053,7 +1054,7 @@ function Client:_unregister(unregistrations)
   self:_unregister_dynamic(unregistrations)
   for _, unreg in ipairs(unregistrations) do
     if unreg.method == 'workspace/didChangeWatchedFiles' then
-      lsp._watchfiles.unregister(unreg, self.id)
+      lsp._watchfiles.unregister(unreg.id, self.id)
     end
   end
 end
@@ -1129,6 +1130,8 @@ end
 --- @param cmd lsp.Command
 --- @param context? {bufnr?: integer}
 --- @param handler? lsp.Handler only called if a server command
+--- @return boolean success Whether a local command ran or a server request was sent.
+--- @return integer? request_id The request ID, if a server request was sent.
 function Client:exec_cmd(cmd, context, handler)
   context = vim.deepcopy(context or {}, true) --[[@as lsp.HandlerContext]]
   context.bufnr = vim._resolve_bufnr(context.bufnr)
@@ -1137,7 +1140,7 @@ function Client:exec_cmd(cmd, context, handler)
   local fn = self.commands[cmdname] or lsp.commands[cmdname]
   if fn then
     fn(cmd, context)
-    return
+    return true
   end
 
   local command_provider = self.server_capabilities.executeCommandProvider
@@ -1152,7 +1155,7 @@ function Client:exec_cmd(cmd, context, handler)
       ),
       vim.log.levels.WARN
     )
-    return
+    return false
   end
   -- Not using cmd directly to exclude extra properties,
   -- see https://github.com/python-lsp/python-lsp-server/issues/146
@@ -1161,7 +1164,7 @@ function Client:exec_cmd(cmd, context, handler)
     command = cmdname,
     arguments = cmd.arguments,
   }
-  self:request('workspace/executeCommand', params, handler, context.bufnr)
+  return self:request('workspace/executeCommand', params, handler, context.bufnr)
 end
 
 --- Default handler for the 'textDocument/didClose' LSP notification.
@@ -1383,7 +1386,7 @@ end
 --- Handles a notification sent by an LSP server by invoking the
 --- corresponding handler.
 ---
---- @param method vim.lsp.protocol.Method.ServerToClient.Notification LSP method name
+--- @param method string LSP method name
 --- @param params table The parameters for that method.
 function Client:_notification(method, params)
   log.trace('notification', method, params)
@@ -1397,7 +1400,7 @@ end
 --- @private
 --- Handles a request from an LSP server by invoking the corresponding handler.
 ---
---- @param method (vim.lsp.protocol.Method.ServerToClient) LSP method name
+--- @param method string LSP method name
 --- @param params (table) The parameters for that method
 --- @return any result
 --- @return lsp.ResponseError? error code and message set in case an exception happens during the request.
@@ -1422,7 +1425,6 @@ end
 function Client:_on_error(code, err)
   self:write_error(code, err)
   if self._on_error_cb then
-    --- @type boolean, string
     local status, usererr = pcall(self._on_error_cb, code, err)
     if not status then
       log.error(self._log_prefix, 'user on_error failed', { err = usererr })
@@ -1576,10 +1578,12 @@ function Client:_remove_workspace_folder(dir)
     event = { added = {}, removed = wf },
   })
 
-  for idx, folder in pairs(self.workspace_folders) do
-    if folder.name == dir then
-      table.remove(self.workspace_folders, idx)
-      break
+  if self.workspace_folders then
+    for idx, folder in pairs(self.workspace_folders) do
+      if folder.name == dir then
+        table.remove(self.workspace_folders, idx)
+        break
+      end
     end
   end
 end

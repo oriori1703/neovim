@@ -31,7 +31,7 @@ local border_size = {
 
 --- Check the border given by opts or the default border for the additional
 --- size it adds to a float.
---- @param opts? {border:string|(string|[string,string])[]}
+--- @param opts? vim.lsp.util.open_floating_preview.Opts
 --- @return integer height
 --- @return integer width
 local function get_border_size(opts)
@@ -231,12 +231,10 @@ function M.apply_text_edits(text_edits, bufnr, position_encoding, change_annotat
       end
     end
 
-    --- @cast text_edits (lsp.TextEdit|lsp.AnnotatedTextEdit|{_index: integer})[]
+    --- @cast text_edits ((lsp.TextEdit|lsp.AnnotatedTextEdit)&{_index: integer})[]
 
-    -- Sort text_edits
-    ---@param a (lsp.TextEdit|lsp.AnnotatedTextEdit|{_index: integer})
-    ---@param b (lsp.TextEdit|lsp.AnnotatedTextEdit|{_index: integer})
-    ---@return boolean
+    -- The checker rejects this array against its own inferred intersection type.
+    --- @diagnostic disable-next-line: param-type-mismatch
     table.sort(text_edits, function(a, b)
       if a.range.start.line ~= b.range.start.line then
         return a.range.start.line > b.range.start.line
@@ -422,7 +420,9 @@ function M.apply_text_document_edit(
     return
   end
 
-  M.apply_text_edits(text_document_edit.edits, bufnr, position_encoding, change_annotations)
+  -- Snippet edits are not supported or advertised in our client capabilities.
+  local edits = text_document_edit.edits --[[@as (lsp.TextEdit|lsp.AnnotatedTextEdit)[] ]]
+  M.apply_text_edits(edits, bufnr, position_encoding, change_annotations)
 end
 
 --- @param path string
@@ -724,13 +724,13 @@ function M.convert_signature_help_to_markdown_lines(signature_help, ft, triggers
     -- special characters like underscore or similar from being interpreted
     -- as markdown font modifiers
     if type(doc) == 'string' then
-      signature.documentation = { kind = 'plaintext', value = doc }
+      doc = { kind = 'plaintext', value = doc }
     end
     -- Add delimiter if there is documentation to display
-    if signature.documentation.value ~= '' then
+    if doc.value ~= '' then
       contents[#contents + 1] = '---'
     end
-    M.convert_input_to_markdown_lines(signature.documentation, contents)
+    M.convert_input_to_markdown_lines(doc, contents)
   end
   if signature.parameters and #signature.parameters > 0 then
     local active_parameter = signature.activeParameter or signature_help.activeParameter
@@ -749,7 +749,8 @@ function M.convert_signature_help_to_markdown_lines(signature_help, ft, triggers
       return contents, nil
     end
 
-    local parameter = signature.parameters[active_parameter + 1]
+    -- The active parameter was checked against the bounds of this array above.
+    local parameter = assert(signature.parameters[active_parameter + 1])
     local parameter_label = parameter.label
     if type(parameter_label) == 'table' then
       active_offset = parameter_label
@@ -783,6 +784,8 @@ function M.convert_signature_help_to_markdown_lines(signature_help, ft, triggers
 
   local active_hl = nil
   if active_offset then
+    -- Treat LSP's uinteger offsets as integers for arithmetic.
+    --- @cast active_offset [integer, integer]
     -- Account for the start of the markdown block.
     if ft then
       active_offset[1] = active_offset[1] + #contents[1]
@@ -812,8 +815,6 @@ function M.make_floating_popup_options(width, height, opts)
   validate('opts.offset_x', opts.offset_x, 'number', true)
   validate('opts.offset_y', opts.offset_y, 'number', true)
 
-  local anchor = ''
-
   local lines_above = vim.fn.winline() - 1
   local lines_below = vim.fn.winheight(0) - lines_above
   if opts.relative == 'mouse' then
@@ -841,11 +842,9 @@ function M.make_floating_popup_options(width, height, opts)
   local border_height = get_border_size(opts)
   local row, col --- @type integer?, integer?
   if anchor_below then
-    anchor = anchor .. 'N'
     height = math.max(math.min(lines_below - border_height, height), 0)
     row = 1
   else
-    anchor = anchor .. 'S'
     height = math.max(math.min(lines_above - border_height, height), 0)
     row = 0
   end
@@ -857,11 +856,12 @@ function M.make_floating_popup_options(width, height, opts)
     wincol = 0
   end
 
+  local anchor --- @type 'NW'|'NE'|'SW'|'SE'
   if wincol + width + (opts.offset_x or 0) <= vim.o.columns then
-    anchor = anchor .. 'W'
+    anchor = anchor_below and 'NW' or 'SW'
     col = 0
   else
-    anchor = anchor .. 'E'
+    anchor = anchor_below and 'NE' or 'SE'
     col = 1
   end
 
@@ -913,6 +913,18 @@ function M.show_document(location, position_encoding, opts)
   if uri == nil then
     return false
   end
+  local range = location.range or location.targetSelectionRange
+  return M._show_document(uri, range, position_encoding, opts)
+end
+
+--- Shows a document, preserving its cursor position when no range is given.
+--- @private
+--- @param uri string
+--- @param range lsp.Range?
+--- @param position_encoding 'utf-8'|'utf-16'|'utf-32'
+--- @param opts? vim.lsp.util.show_document.Opts
+--- @return boolean
+function M._show_document(uri, range, position_encoding, opts)
   local bufnr = vim.uri_to_bufnr(uri)
 
   -- Return early if the buffer fails to load, to avoid partial setup.
@@ -944,8 +956,6 @@ function M.show_document(location, position_encoding, opts)
     api.nvim_set_current_win(win)
   end
 
-  -- location may be Location or LocationLink
-  local range = location.range or location.targetSelectionRange
   if range then
     -- Jump to new location (adjusting for encoding of characters)
     local pos = vim.pos.lsp(bufnr, range.start, position_encoding)
@@ -1070,7 +1080,7 @@ local function replace_separators(contents, divider)
   local trimmed = {}
   local l = 1
   while l <= #contents do
-    local line = contents[l]
+    local line = assert(contents[l])
     if is_separator_line(line) then
       if l > 1 and is_blank_line(contents[l - 1]) then
         table.remove(trimmed)
@@ -1156,14 +1166,14 @@ function M.stylize_markdown(bufnr, contents, opts)
   }
 
   --- @param line string
-  --- @return {type:string,ft:string}?
+  --- @return {pattern:string,ft:string}?
   local function match_begin(line)
-    for type, pattern in pairs(matchers) do
+    for _, pattern in pairs(matchers) do
       --- @type string?
       local ret = line:match(string.format('^%%s*%s%%s*$', pattern[2]))
       if ret then
         return {
-          type = type,
+          pattern = pattern[3],
           ft = pattern[1] or ret,
         }
       end
@@ -1171,11 +1181,10 @@ function M.stylize_markdown(bufnr, contents, opts)
   end
 
   --- @param line string
-  --- @param match {type:string,ft:string}
+  --- @param match {pattern:string,ft:string}
   --- @return string?
   local function match_end(line, match)
-    local pattern = matchers[match.type]
-    return line:match(string.format('^%%s*%s%%s*$', pattern[3]))
+    return line:match(string.format('^%%s*%s%%s*$', match.pattern))
   end
 
   -- Clean up
@@ -1186,13 +1195,13 @@ function M.stylize_markdown(bufnr, contents, opts)
 
   local i = 1
   while i <= #contents do
-    local line = contents[i]
+    local line = assert(contents[i])
     local match = match_begin(line)
     if match then
       local start = #stripped
       i = i + 1
       while i <= #contents do
-        line = contents[i]
+        line = assert(contents[i])
         if match_end(line, match) then
           i = i + 1
           break
@@ -1254,8 +1263,8 @@ function M.stylize_markdown(bufnr, contents, opts)
 
   local sep_line = string.rep('─', math.min(width, opts.wrap_at or width))
 
-  for l in ipairs(stripped) do
-    if stripped[l]:match('^---+$') then
+  for l, line in ipairs(stripped) do
+    if line:match('^---+$') then
       stripped[l] = sep_line
     end
   end
@@ -1328,7 +1337,7 @@ function M.stylize_markdown(bufnr, contents, opts)
 end
 
 --- @class (private) vim.lsp.util._normalize_markdown.Opts
---- @field width integer Thematic breaks are expanded to this size. Defaults to 80.
+--- @field width? integer Thematic breaks are expanded to this size. Defaults to 80.
 
 --- Normalizes Markdown input to a canonical form.
 ---
@@ -1545,7 +1554,7 @@ end
 ---
 --- offset to add to `row`
 --- @field offset_y? integer
---- @field border? string|(string|[string,string])[] override `border`
+--- @field border? ''|'none'|'single'|'double'|'rounded'|'solid'|'shadow'|'bold'|(string|[string,string])[] override `border`
 --- @field zindex? integer override `zindex`, defaults to 50
 --- @field title? string|[string,string][]
 --- @field title_pos? 'left'|'center'|'right'
@@ -1679,8 +1688,8 @@ function M.open_floating_preview(contents, syntax, opts)
     'WinClosed',
     api.nvim_create_augroup('nvim.closing_floating_preview', { clear = true }),
     function(args)
-      local winid = vim._tointeger(args.match)
-      local preview_bufnr = vim.w[winid].lsp_floating_bufnr
+      local winid = vim._assert_integer(args.match)
+      local preview_bufnr = vim.w[winid].lsp_floating_bufnr --- @type integer?
       if
         preview_bufnr
         and api.nvim_buf_is_valid(preview_bufnr)
@@ -1986,7 +1995,7 @@ function M.make_formatting_params(options)
   options = vim.tbl_extend('keep', options or {}, {
     tabSize = M.get_effective_tabstop(),
     insertSpaces = vim.bo.expandtab,
-  })
+  }) --[[@as lsp.FormattingOptions]]
   return {
     textDocument = { uri = vim.uri_from_bufnr(0) },
     options = options,

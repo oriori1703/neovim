@@ -42,7 +42,7 @@ do
         vim.ui.open(current_file)
       end
     else
-      vim.ui.open(cmd.fargs[1])
+      vim.ui.open(assert(cmd.fargs[1]))
     end
   end, {
     desc = 'Open file with system default handler. See :help vim.ui.open()',
@@ -59,7 +59,6 @@ do
   do
     --- @param forward 0|1
     local function _visual_search(forward)
-      assert(forward == 0 or forward == 1)
       local pos = vim.fn.getpos('.')
       local vpos = vim.fn.getpos('v')
       local mode = vim.fn.mode()
@@ -758,9 +757,10 @@ do
     desc = 'Skip the swapfile prompt when the swapfile is owned by a running Nvim process',
   }, function()
     local info = vim.fn.swapinfo(vim.v.swapname)
-    local user = vim.uv.os_get_passwd().username
+    local passwd = vim.uv.os_get_passwd()
+    local user = passwd and passwd.username
     local iswin = 1 == vim.fn.has('win32')
-    if info.error or info.pid <= 0 or (not iswin and info.user ~= user) then
+    if info.error or info.pid <= 0 or (not iswin and (not user or info.user ~= user)) then
       vim.v.swapchoice = '' -- Show the prompt.
       return
     end
@@ -1054,7 +1054,7 @@ do
         end
 
         -- The returned SGR sequence should begin with 48:2
-        local sgr = assert(attrs[#attrs]):match('^48:2:([%d:]+)$')
+        local sgr = attrs[#attrs]:match('^48:2:([%d:]+)$')
         if not sgr then
           return
         end

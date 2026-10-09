@@ -2,6 +2,7 @@
 --- The `vim.lsp.buf_…` functions perform operations for LSP clients attached to the current buffer.
 
 local api = vim.api
+local do_or_select = require('vim._core.util').do_or_select
 local nvim_on = require('vim._core.util').nvim_on
 local lsp = vim.lsp
 local validate = vim.validate
@@ -268,7 +269,7 @@ local function get_locations(method, context, opts)
       vim.list_extend(all_items, items)
     end
 
-    local name = string.gsub(method:match('textDocument/(.*)'), '(%u)', ' %1'):lower()
+    local name = string.gsub(assert(method:match('textDocument/(.*)')), '(%u)', ' %1'):lower()
     if vim.tbl_isempty(all_items) then
       vim.notify(('No %s found'):format(name), vim.log.levels.INFO)
       return
@@ -476,7 +477,7 @@ function M.signature_help(config)
       return
     end
 
-    local ft = vim.bo[ctx.bufnr].filetype
+    local ft = vim.bo[assert(ctx.bufnr)].filetype
     local total = #signatures
     local can_cycle = total > 1 and config.focusable ~= false
     local idx = active_signature - 1
@@ -484,7 +485,8 @@ function M.signature_help(config)
     --- @param update_win? integer
     local function show_signature(update_win)
       idx = (idx % total) + 1
-      local client, result = signatures[idx][1], signatures[idx][2]
+      local signature = assert(signatures[idx])
+      local client, result = signature[1], signature[2]
       --- @type string[]?
       local triggers =
         vim.tbl_get(client.server_capabilities, 'signatureHelpProvider', 'triggerCharacters')
@@ -548,7 +550,7 @@ end
 
 ---@param bufnr integer
 ---@param mode "v"|"V"
----@return table {start={row,col}, end={row,col}} using (1, 0) indexing
+---@return {start: [integer,integer], end: [integer,integer]} using (1, 0) indexing
 local function range_from_selection(bufnr, mode)
   -- TODO: Use `vim.fn.getregionpos()` instead.
 
@@ -1006,11 +1008,8 @@ local function hierarchy(method)
 
     if #results == 0 then
       vim.notify('No item resolved', vim.log.levels.WARN)
-    elseif #results == 1 then
-      local client_id, item = results[1][1], results[1][2]
-      request_with_id(client_id, method, { item = item }, nil, bufnr)
     else
-      vim.ui.select(results, {
+      do_or_select(results, {
         prompt = string.format('Select a %s hierarchy item:', kind),
         kind = kind .. 'hierarchy',
         format_item = function(x)
@@ -1279,7 +1278,7 @@ local function on_code_action_results(results, opts)
     end
   end
 
-  ---@param choice {action: lsp.Command|lsp.CodeAction, ctx: lsp.HandlerContext}
+  ---@param choice? {action: lsp.Command|lsp.CodeAction, ctx: lsp.HandlerContext}
   local function on_user_choice(choice)
     if not choice then
       return
@@ -1417,14 +1416,14 @@ function M.code_action(opts)
   end
 
   lsp.buf_request_all(bufnr, 'textDocument/codeAction', function(client)
-    ---@type lsp.CodeActionParams
     local params
 
     if range then
-      assert(type(range) == 'table', 'code_action range must be a table')
-      local start = assert(range.start, 'range must have a `start` property')
-      local end_ = assert(range['end'], 'range must have a `end` property')
-      params = util.make_given_range_params(start, end_, bufnr, client.offset_encoding)
+      validate('range', range, 'table')
+      validate('range.start', range.start, 'table')
+      validate('range.end', range['end'], 'table')
+      params =
+        util.make_given_range_params(range.start, range['end'], bufnr, client.offset_encoding)
     else
       params = util.make_range_params(win, client.offset_encoding)
     end
@@ -1438,6 +1437,7 @@ function M.code_action(opts)
       local diagnostics = {}
 
       client:_provider_foreach('textDocument/diagnostic', function(cap)
+        --- @cast cap lsp.DiagnosticRegistrationOptions
         local ns_pull = lsp.diagnostic.get_namespace(client.id, true, cap.identifier)
         vim.list_extend(
           diagnostics,
@@ -1500,7 +1500,7 @@ function M.selection_range(direction, timeout_ms)
     local new_index = selection_ranges.index + direction
     selection_ranges.index = math.min(#selection_ranges.ranges, math.max(1, new_index))
 
-    select_range(selection_ranges.ranges[selection_ranges.index])
+    select_range(assert(selection_ranges.ranges[selection_ranges.index]))
     return
   end
 
@@ -1534,7 +1534,7 @@ function M.selection_range(direction, timeout_ms)
   end
 
   -- We only requested one range, thus we get the first and only response here.
-  local response = assert(result[client.id].result[1]) ---@type lsp.SelectionRange
+  local response = assert(result[client.id].result[1]) ---@type lsp.SelectionRange?
   local ranges = {} ---@type lsp.Range[]
   local lines = api.nvim_buf_get_lines(0, 0, -1, false)
 
@@ -1569,7 +1569,7 @@ function M.selection_range(direction, timeout_ms)
   if #ranges > 0 then
     local index = math.min(#ranges, math.max(1, direction))
     selection_ranges = { index = index, ranges = ranges }
-    select_range(ranges[index])
+    select_range(assert(ranges[index]))
   end
 end
 

@@ -404,7 +404,7 @@ Object nvim_set_option_value(uint64_t channel_id, String name, Object value, Dic
   if (optval_right.type == kObjectTypeInteger || optval_right.type == kObjectTypeString) {
     Object oldval = optval_own(opt_idx, opt_from_varp(opt_idx, varp));
     merged_val = get_option_newval(opt_idx, opt_flags, PREFIX_NONE, &argp, 0, operation,
-                                   option->flags, varp, &oldval, &errmsg);
+                                   varp, &oldval, &errmsg);
     optval_free(oldval);
     VALIDATE(errmsg == NULL, "%s", errmsg, {
       return NIL;
@@ -421,7 +421,7 @@ Object nvim_set_option_value(uint64_t channel_id, String name, Object value, Dic
     }
   } else {
     WITH_SCRIPT_CONTEXT(channel_id, {
-      set_option_value_for(opt_idx, merged_val, opt_flags, scope, to, err);
+      set_option_value_for(opt_idx, merged_val, opt_flags, scope, to, operation == OP_NONE, err);
     });
   }
 

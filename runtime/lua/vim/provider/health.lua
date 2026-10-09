@@ -5,10 +5,10 @@ local M = {}
 
 ---@param cmd string[]
 ---@return boolean
----@return string?
+---@return string
 local function cmd_ok(cmd)
   local result = vim.system(cmd, { text = true }):wait()
-  return result.code == 0, result.stdout
+  return result.code == 0, assert(result.stdout)
 end
 
 ---@param cmd string[]
@@ -83,7 +83,7 @@ local function system(cmd, args)
     vim.fn.chansend(jobid, stdin)
   end
 
-  local res = vim.fn.jobwait({ jobid }, vim.nonnil(args.timeout, 30) * 1000)
+  local res = vim.fn.jobwait({ jobid }, math.floor(vim.nonnil(args.timeout, 30) * 1000))
   if res[1] == -1 then
     error('Command timed out: ' .. shellify(cmd))
     vim.fn.jobstop(jobid)
@@ -193,7 +193,7 @@ local function node()
 
   local ok, node_v = cli_version({ 'node', '-v' })
   health.info('Node.js: ' .. tostring(node_v))
-  if not ok or vim.version.lt(node_v, '6.0.0') then
+  if not ok or vim.version.lt(assert(node_v), '6.0.0') then
     health.warn('Nvim node.js host does not support Node ' .. node_v)
     -- Skip further checks, they are nonsense if nodejs is too old.
     return
@@ -204,7 +204,7 @@ local function node()
     )
   end
 
-  local node_detect_table = vim.fn['provider#node#Detect']() ---@type string[]
+  local node_detect_table = vim.fn['provider#node#Detect']() ---@type [string, string]
   local host = node_detect_table[1]
   if host:find('^%s*$') then
     health.warn('Missing "neovim" npm (or yarn, pnpm, bun) package.', {
@@ -323,13 +323,13 @@ local function perl()
     return
   elseif latest_cpan[1] == '!' then
     local cpanm_errs = vim.split(latest_cpan, '!')
-    if cpanm_errs[1]:find("Can't write to ") then
+    if assert(cpanm_errs[1]):find("Can't write to ") then
       local advice = {} ---@type string[]
       for i = 2, #cpanm_errs do
         advice[#advice + 1] = cpanm_errs[i]
       end
 
-      health.warn(cpanm_errs[1], advice)
+      health.warn(assert(cpanm_errs[1]), advice)
       -- Last line is the package info
       latest_cpan = cpanm_errs[#cpanm_errs]
     else
@@ -386,10 +386,10 @@ local function python_exepath(invocation)
   end
   local p = vim.system({ invocation, '-c', 'import sys; sys.stdout.write(sys.executable)' }):wait()
   if p.code ~= 0 then
-    health.warn(p.stderr)
+    health.warn(assert(p.stderr))
     return nil
   end
-  return vim.fs.normalize(vim.trim(p.stdout))
+  return vim.fs.normalize(vim.trim(assert(p.stdout)))
 end
 
 --- Check if pyenv is available and a valid pyenv root can be found, then return
@@ -419,7 +419,7 @@ local function check_for_pyenv()
       health.warn(message)
       return { '', '' }
     end
-    pyenv_root = vim.trim(p.stdout)
+    pyenv_root = vim.trim(assert(p.stdout))
     health.info('pyenv: $PYENV_ROOT is not set. Infer from `pyenv root`.')
   end
 
@@ -766,7 +766,7 @@ local function python()
     local latest = version_info_table[3]
     local status = version_info_table[4]
 
-    if not vim.version.range('~3'):has(pyversion) then
+    if not assert(vim.version.range('~3')):has(pyversion) then
       health.warn('Unexpected Python version. This could lead to confusing error messages.')
     end
 
@@ -837,13 +837,13 @@ local function python()
           },
         }
         for bintype, bin in pairs(bintable) do
-          if vim.fn.resolve(venv_bin) ~= vim.fn.resolve(bin['path']) then
+          if not bin.path or vim.fn.resolve(venv_bin) ~= vim.fn.resolve(bin.path) then
             local type_of_path = bintype == 'subshell' and '$PATH' or '$PATH in subshell'
             errors[#errors + 1] = type_of_path
               .. ' yields this '
               .. py_bin_basename
               .. ' executable: '
-              .. bin['path']
+              .. tostring(bin.path)
             hints[bin['hint']] = true
           end
         end

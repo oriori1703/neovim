@@ -20,10 +20,9 @@ local function filter_highest(diagnostics)
   -- Find the first diagnostic where the severity does not match the highest severity, and remove
   -- that element and all subsequent elements from the array
   local worst = (diagnostics[1] or {}).severity
-  local len = #diagnostics
-  for i = 2, len do
+  for i = 2, #diagnostics do
     if diagnostics[i].severity ~= worst then
-      for j = i, len do
+      for j = i, #diagnostics do
         diagnostics[j] = nil
       end
       break
@@ -241,7 +240,7 @@ function M.jump(opts)
   )
 
   -- Apply configuration options from vim.diagnostic.config()
-  local config = assert(vim.diagnostic.config()).jump or {}
+  local config = vim.diagnostic.config().jump or {}
   opts = vim.tbl_deep_extend('keep', opts, config)
   --- @cast opts vim.diagnostic._JumpOpts
 
@@ -250,7 +249,7 @@ function M.jump(opts)
     return opts.diagnostic
   end
 
-  local count = opts.count
+  local count = assert(opts.count)
   if count == 0 then
     return nil
   end

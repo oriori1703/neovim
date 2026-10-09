@@ -40,9 +40,9 @@ function vim.api.nvim__cmdwin_set(type, buf) end
 --- @param index integer Completion candidate index
 --- @param opts vim.api.keyset.complete_set? Optional parameters.
 --- - info: (string) info text.
---- @return table<string,number> # Dict containing these keys:
---- - winid: (number) floating window id
---- - bufnr: (number) buffer id in floating window
+--- @return table<string,integer> # Dict containing these keys:
+--- - winid: (integer) floating window id
+--- - bufnr: (integer) buffer id in floating window
 function vim.api.nvim__complete_set(index, opts) end
 
 --- WARNING: This feature is experimental/unstable.
@@ -696,7 +696,8 @@ function vim.api.nvim_buf_line_count(buf) end
 ---   hidden because of scrolling with 'nowrap' or 'smoothscroll'. Currently only
 ---   affects "overlay" virt_text.
 --- - virt_text_pos: Position of virtual text:
----   - "eol": Right after EOL character (default).
+---   - "eol": One cell after the line text or its displayed 'listchars' EOL character
+---     (default).
 ---   - "eol_right_align": Display right-aligned in the window unless the virtual text
 ---     is longer than the space available. If the virtual text is too long, it is
 ---     truncated to fit in the window after the EOL character. If the line is
@@ -848,6 +849,14 @@ function vim.api.nvim_call_function(fn, args) end
 --- @param chan integer Channel id
 --- @param data string Data to write. 8-bit clean: may contain NUL bytes.
 function vim.api.nvim_chan_send(chan, data) end
+
+--- Sets channel properties.
+---
+--- @param chan integer Channel id, or 0 for current (RPC) channel.
+--- @param config vim.api.keyset.chan_set Properties:
+--- - detach: (boolean, default: true) Closing the channel does not self-exit Nvim. Nvim
+---   self-exits when the last `detach=false` `RPC` channel closes. See also `:detach!`.
+function vim.api.nvim_chan_set(chan, config) end
 
 --- Clears all autocommands matching the {opts} query. To delete autocmds see `nvim_del_autocmd()`.
 ---
@@ -1301,17 +1310,19 @@ function vim.api.nvim_get_autocmds(opts) end
 
 --- Gets information about a channel.
 ---
---- See `nvim_list_uis()` for an example of how to get channel info.
+--- The docs for `nvim_list_uis()` show an example.
 ---
---- @param chan integer channel_id, or 0 for current channel
+--- @param chan integer Channel id, or 0 for current (RPC) channel
 --- @return table<string,any> # Channel info dict with these keys:
---- - "id"       Channel id.
 --- - "argv"     (optional) Job arguments list.
---- - "stream"   Stream underlying the channel.
----      - "stdio"      stdin and stdout of this Nvim instance
----      - "stderr"     stderr of this Nvim instance
----      - "socket"     TCP/IP socket or named pipe
----      - "job"        Job with communication over its stdio.
+--- - "buf"      (optional) Buffer connected to |terminal| instance.
+--- - "buffer"   (optional) Deprecated alias for `buf`.
+--- - "client"   (optional) Info about the peer (client on the other end of the channel), as set
+---              by |nvim_set_client_info()|.
+--- - "detach"   (optional) Closing the |RPC| channel does not exit Nvim. |nvim_chan_set()|
+--- - "exitcode" (optional) Exit code of the |terminal| process.
+--- - "id"       Channel id.
+--- - "internal" (optional) In-process channel (stream=socket).
 --- - "mode"     How data received on the channel is interpreted.
 ---      - "bytes"      Send and receive raw bytes.
 ---      - "terminal"   |terminal| instance interprets ASCII sequences.
@@ -1319,12 +1330,11 @@ function vim.api.nvim_get_autocmds(opts) end
 --- - "pty"      (optional) Name of pseudoterminal. On a POSIX system this is a device path like
 ---              "/dev/pts/1". If unknown, the key will still be present if a pty is used (e.g.
 ---              for conpty on Windows).
---- - "buf"      (optional) Buffer connected to |terminal| instance.
---- - "buffer"   (optional) Deprecated alias for `buf`.
---- - "client"   (optional) Info about the peer (client on the other end of the channel), as set
----              by |nvim_set_client_info()|.
---- - "exitcode" (optional) Exit code of the |terminal| process.
----
+--- - "stream"   Stream underlying the channel.
+---      - "stdio"      stdin and stdout of this Nvim instance
+---      - "stderr"     stderr of this Nvim instance
+---      - "socket"     TCP/IP socket or named pipe
+---      - "job"        Job with communication over its stdio.
 function vim.api.nvim_get_chan_info(chan) end
 
 --- Returns the 24-bit RGB value of a `nvim_get_color_map()` color name or
@@ -1681,13 +1691,6 @@ function vim.api.nvim_list_wins() end
 --- @return any
 function vim.api.nvim_load_context(dict) end
 
---- Adds a multicursor in the given buffer.
----
---- @param buf integer Buffer handle, or 0 for current buffer
---- @param pos [integer, integer] (row, col) (1,0)-indexed cursor position (byte offset)
---- @return integer # Total number of extra cursors.
-function vim.api.nvim_mcursor(buf, pos) end
-
 --- @deprecated
 --- @param msg string
 --- @param log_level integer
@@ -1898,7 +1901,7 @@ function vim.api.nvim_out_write(str) end
 ---
 --- @param str string Command line string to parse. Cannot contain "\n".
 --- @param opts vim.api.keyset.empty? Optional parameters. Reserved for future use.
---- @return vim.api.keyset.cmd # Dict containing command information, with these keys:
+--- @return vim.api.keyset.cmd_ret # Dict containing command information, with these keys:
 --- - cmd: (string) Command name.
 --- - range: (array) (optional) Command range ([<line1>] [<line2>]).
 ---                  Omitted if command doesn't accept a range.

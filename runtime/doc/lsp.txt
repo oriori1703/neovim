@@ -1273,7 +1273,7 @@ formatexpr({opts})                                      *vim.lsp.formatexpr()*
 
     Parameters: ~
       • {opts}  (`table?`) A table with the following fields:
-                • {timeout_ms} (`integer`, default: 500ms) The timeout period
+                • {timeout_ms}? (`integer`, default: 500ms) The timeout period
                   for the formatting request..
 
 get_client_by_id({client_id})                     *vim.lsp.get_client_by_id()*
@@ -1400,9 +1400,9 @@ start({config}, {opts})                                      *vim.lsp.start()*
     Parameters: ~
       • {config}  (`vim.lsp.ClientConfig`) Configuration for the server.
       • {opts}    (`table?`) Optional keyword arguments.
-                  • {attach}? (`boolean`) Whether to attach the client to a
-                    buffer (default true). If set to `false`, `reuse_client`
-                    and `bufnr` will be ignored.
+                  • {attach}? (`boolean`, default: true) Whether to attach the
+                    client to a buffer. If set to `false`, `reuse_client` and
+                    `bufnr` will be ignored.
                   • {bufnr}? (`integer`) Buffer handle to attach to if
                     starting or re-using a client (0 for current).
                   • {reuse_client}?
@@ -1412,8 +1412,8 @@ start({config}, {opts})                                      *vim.lsp.start()*
                     re-uses a client if it has the same name and if the given
                     workspace folders (or root_dir) are all included in the
                     client's workspace folders.
-                  • {silent}? (`boolean`) Suppress error reporting if the LSP
-                    server fails to start (default false).
+                  • {silent}? (`boolean`, default: false) Suppress error
+                    reporting if the LSP server fails to start.
 
     Return: ~
         (`integer?`) client_id
@@ -1804,7 +1804,7 @@ Lua module: vim.lsp.client                                        *lsp-client*
                                 passed to |vim.lsp.start()|.
       • {dynamic_capabilities}  (`lsp.DynamicCapabilities`) Capabilities
                                 provided at runtime (after startup).
-      • {exec_cmd}              (`fun(self: vim.lsp.Client, cmd: lsp.Command, context: {bufnr?: integer}?, handler: lsp.Handler?)`)
+      • {exec_cmd}              (`fun(self: vim.lsp.Client, cmd: lsp.Command, context: {bufnr?: integer}?, handler: lsp.Handler?): boolean, integer?`)
                                 See |Client:exec_cmd()|.
       • {exit_timeout}          (`integer|boolean`, default: `false`) See
                                 |vim.lsp.ClientConfig|.
@@ -1838,7 +1838,7 @@ Lua module: vim.lsp.client                                        *lsp-client*
                                 See |Client:request()|.
       • {request_sync}          (`fun(self: vim.lsp.Client, method: string, params: table, timeout_ms: integer?, bufnr: integer?): {err: lsp.ResponseError?, result:any}?, string?`)
                                 See |Client:request_sync()|.
-      • {requests}              (`table<integer,{ type: string, bufnr: integer, method: string}?>`)
+      • {requests}              (`table<integer,{ type: string, bufnr: integer, method: vim.lsp.protocol.Method}?>`)
                                 The current pending requests in flight to the
                                 server. Entries are key-value pairs with the
                                 key being the request id while the value is a
@@ -1853,7 +1853,7 @@ Lua module: vim.lsp.client                                        *lsp-client*
       • {rpc}                   (`vim.lsp.rpc.Client`) RPC client object, for
                                 low level interaction with the client. See
                                 |vim.lsp.rpc.start()|.
-      • {server_capabilities}   (`lsp.ServerCapabilities?`) Response from the
+      • {server_capabilities}   (`lsp.ServerCapabilities`) Response from the
                                 server sent on `initialize` describing the
                                 server's capabilities.
       • {server_info}           (`lsp.ServerInfo?`) Response from the server
@@ -2052,6 +2052,11 @@ Client:exec_cmd({cmd}, {context}, {handler})               *Client:exec_cmd()*
       • {cmd}      (`lsp.Command`)
       • {context}  (`{bufnr?: integer}?`)
       • {handler}  (`lsp.Handler?`) only called if a server command
+
+    Return (multiple): ~
+        (`boolean`) success Whether a local command ran or a server request
+        was sent.
+        (`integer?`) request_id The request ID, if a server request was sent.
 
 Client:is_stopped()                                      *Client:is_stopped()*
     Checks whether a client is stopped.
@@ -2321,6 +2326,8 @@ get({opts})                                         *vim.lsp.completion.get()*
 
     Parameters: ~
       • {opts}  (`table?`) A table with the following fields:
+                • {client_id}? (`integer|integer[]`) Only request from these
+                  clients. Defaults to all clients with completion enabled.
                 • {ctx}? (`lsp.CompletionContext`) Completion context.
                   Defaults to a trigger kind of `invoked`.
 
@@ -2429,6 +2436,79 @@ is_enabled({filter})                     *vim.lsp.document_color.is_enabled()*
 ==============================================================================
 Lua module: vim.lsp.inlay_hint                                *lsp-inlay_hint*
 
+action({action}, {opts})                         *vim.lsp.inlay_hint.action()*
+    Apply some actions provided by inlay hints in the selected range. Built-in
+    actions are abandoned if the source buffer changes or is unloaded before
+    they can be applied. Hover and tooltip previews are also abandoned if the
+    invoking cursor position changes. The "hover", "tooltip", and "command"
+    actions use only the first hint from each client, and warn if multiple
+    hints were supplied for that client.
+
+    Example usage: >lua
+        vim.keymap.set(
+          { 'n', 'v' },
+          'grI',
+          function()
+            vim.lsp.inlay_hint.action('textEdits')
+          end,
+          { desc = 'Apply inlay hint textEdits' }
+        )
+<
+
+    Parameters: ~
+      • {action}  (`vim.lsp.inlay_hint.action.spec`) Possible actions:
+                  • `"textEdits"`: insert `textEdits` that comes with the
+                    inlay hints.
+                  • `"location"`: jump to one of the locations associated with
+                    the inlay hints.
+                  • `"command"`: execute one of the `lsp.Command`s that comes
+                    with the inlay hint.
+                  • `"hover"`: if there are some locations associated with the
+                    inlay hint, show the hover information of the identifiers
+                    at those locations.
+                  • `"tooltip"`: show a hover-like window that contains the
+                    `tooltip`, available `command`s and `location`s that comes
+                    with the inlay hint.
+                  • a custom handler with 3 parameters:
+                    • `hints`: `lsp.InlayHint[]` a list of inlay hints in the
+                      requested range. Hint positions use byte indices, as in
+                      `vim.lsp.inlay_hint.get()`.
+                    • `ctx`: `{buf: integer, client: vim.lsp.Client}` the
+                      buffer on which the action is taken, and the LSP client
+                      that provides `hints`.
+                    • `on_done`:
+                      `fun(ctx: {buf: integer, client?: vim.lsp.Client})` see
+                      `on_done` in {opts}. Always supplied, even when {opts}
+                      omits `on_done`.
+                    The handler must return `true` if it handled the action
+                    (and then call `on_done` exactly once when the action
+                    finishes), or `false` if `hints` did not contain what the
+                    action needs, in which case the hints of the next
+                    available client are tried.
+      • {opts}    (`table?`) A table with the following fields:
+                  • {hints}? (`table[]`) Inlay hints (returned by
+                    `vim.lsp.inlay_hint.get()`) to take actions on. All hints
+                    must belong to the same buffer, which need not be the
+                    current buffer. Mixed-buffer lists are rejected before any
+                    action is taken. When not specified:
+                    • in |Normal-mode|, it uses hints on either side of the
+                      cursor.
+                    • in |Visual-mode|, it uses hints inside the selected
+                      range.
+                    • {bufnr} (`integer`)
+                    • {client_id} (`integer`)
+                    • {inlay_hint} (`lsp.InlayHint`)
+                  • {on_done}? (`vim.lsp.inlay_hint.action.on_done.callback`)
+                    A callback invoked exactly once (asynchronously) at the
+                    end of the action. Also invoked when no action is taken,
+                    selection is cancelled, or a request fails. Receives a
+                    context with these fields:
+                    • `buf`: the preview buffer for hover/tooltip, the
+                      destination buffer for location, or the source buffer
+                      otherwise. The source buffer may have been deleted.
+                    • `client`: the client used by the action, or nil when no
+                      action was taken.
+
 enable({enable}, {filter})                       *vim.lsp.inlay_hint.enable()*
     Enables or disables inlay hints for the {filter}ed scope.
 
@@ -2467,6 +2547,8 @@ get({filter})                                       *vim.lsp.inlay_hint.get()*
           position = location.range.start,
         })
 <
+
+    |vim.lsp.inlay_hint.action()| does all of the above for you.
 
     Attributes: ~
         Since: 0.10.0
@@ -2912,8 +2994,8 @@ Lua module: vim.lsp.util                                            *lsp-util*
                          • "below": place the window below the cursor unless
                            there are not enough lines to display the full
                            window height.
-      • {border}?        (`string|(string|[string,string])[]`) override
-                         `border`
+      • {border}?        (`''|'none'|'single'|'double'|'rounded'|'solid'|'shadow'|'bold'|(string|[string,string])[]`)
+                         override `border`
       • {close_events}?  (`table`) List of events that closes the floating
                          window
       • {focus}?         (`boolean`, default: `true`) If `true`, and if

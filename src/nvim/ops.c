@@ -122,6 +122,7 @@ static const char opchars[][3] = {
   { 'g', '@', OPF_CHANGE },              // OP_FUNCTION
   { Ctrl_A, NUL, OPF_CHANGE },           // OP_NR_ADD
   { Ctrl_X, NUL, OPF_CHANGE },           // OP_NR_SUB
+  { 'z', 'q', 0 },                       // OP_MCURSOR
 };
 
 /// Translate a command name into an operator type.
@@ -471,12 +472,13 @@ static void shift_block(oparg_T *oap, int amount)
     StrCharInfo ci = utf_ptr2StrCharInfo(bd.textstart);
     int vcol = bd.start_vcol;
     while (ascii_iswhite(ci.chr.value)) {
-      incr = win_charsize(cstype, vcol, ci.ptr, ci.chr.value, &csarg).width;
-      ci = utfc_next(ci);
+      ClusterInfo cli = utf_ClusterInfo(ci);
+      incr = win_charsize(cstype, vcol, ci.ptr, ci.chr.value, &csarg, cli.cells).width;
+      ci = cli.next;
       total += incr;
       vcol += incr;
     }
-    bd.textstart = ci.ptr;
+    bd.textstart = (char *)ci.ptr;
     bd.start_vcol = vcol;
 
     int tabs = 0;
@@ -531,7 +533,7 @@ static void shift_block(oparg_T *oap, int amount)
     CharsizeArg csarg;
     CSType cstype = init_charsize_arg(&csarg, curwin, curwin->w_cursor.lnum, bd.textstart);
     while (ascii_iswhite(*non_white)) {
-      incr = win_charsize(cstype, non_white_col, non_white, (uint8_t)(*non_white), &csarg).width;
+      incr = win_charsize(cstype, non_white_col, non_white, (uint8_t)(*non_white), &csarg, 1).width;
       non_white_col += incr;
       non_white++;
     }
@@ -556,14 +558,16 @@ static void shift_block(oparg_T *oap, int amount)
     cstype = init_charsize_arg(&csarg, curwin, 0, bd.textstart);
     StrCharInfo ci = utf_ptr2StrCharInfo(verbatim_copy_end);
     while (verbatim_copy_width < destination_col) {
-      incr = win_charsize(cstype, verbatim_copy_width, ci.ptr, ci.chr.value, &csarg).width;
+      ClusterInfo cli = utf_ClusterInfo(ci);
+      incr = win_charsize(cstype, verbatim_copy_width, ci.ptr, ci.chr.value, &csarg,
+                          cli.cells).width;
       if (verbatim_copy_width + incr > destination_col) {
         break;
       }
       verbatim_copy_width += incr;
-      ci = utfc_next(ci);
+      ci = cli.next;
     }
-    verbatim_copy_end = ci.ptr;
+    verbatim_copy_end = (char *)ci.ptr;
 
     // If "destination_col" is different from the width of the initial
     // part of the line that will be copied, it means we encountered a tab
@@ -2151,7 +2155,8 @@ void block_prep(oparg_T *oap, struct block_def *bdp, linenr_T lnum, bool is_del)
   StrCharInfo ci = utf_ptr2StrCharInfo(line);
   int vcol = bdp->start_vcol;
   while (vcol < oap->start_vcol && *ci.ptr != NUL) {
-    incr = win_charsize(cstype, vcol, ci.ptr, ci.chr.value, &csarg).width;
+    ClusterInfo cli = utf_ClusterInfo(ci);
+    incr = win_charsize(cstype, vcol, ci.ptr, ci.chr.value, &csarg, cli.cells).width;
     vcol += incr;
     if (ascii_iswhite(ci.chr.value)) {
       bdp->pre_whitesp += incr;
@@ -2160,11 +2165,11 @@ void block_prep(oparg_T *oap, struct block_def *bdp, linenr_T lnum, bool is_del)
       bdp->pre_whitesp = 0;
       bdp->pre_whitesp_c = 0;
     }
-    prev_pstart = ci.ptr;
-    ci = utfc_next(ci);
+    prev_pstart = (char *)ci.ptr;
+    ci = cli.next;
   }
   bdp->start_vcol = vcol;
-  char *pstart = ci.ptr;
+  char *pstart = (char *)ci.ptr;
 
   bdp->start_char_vcols = incr;
   if (bdp->start_vcol < oap->start_vcol) {      // line too short
@@ -2180,7 +2185,7 @@ void block_prep(oparg_T *oap, struct block_def *bdp, linenr_T lnum, bool is_del)
     if (is_del && bdp->startspaces) {
       bdp->startspaces = bdp->start_char_vcols - bdp->startspaces;
     }
-    char *pend = pstart;
+    const char *pend = pstart;
     bdp->end_vcol = bdp->start_vcol;
     if (bdp->end_vcol > oap->end_vcol) {  // it's all in one character
       bdp->is_oneChar = true;
@@ -2204,12 +2209,13 @@ void block_prep(oparg_T *oap, struct block_def *bdp, linenr_T lnum, bool is_del)
       cstype = init_charsize_arg(&csarg, curwin, lnum, line);
       ci = utf_ptr2StrCharInfo(pend);
       vcol = bdp->end_vcol;
-      char *prev_pend = pend;
+      const char *prev_pend = pend;
       while (vcol <= oap->end_vcol && *ci.ptr != NUL) {
         prev_pend = ci.ptr;
-        incr = win_charsize(cstype, vcol, ci.ptr, ci.chr.value, &csarg).width;
+        ClusterInfo cli = utf_ClusterInfo(ci);
+        incr = win_charsize(cstype, vcol, ci.ptr, ci.chr.value, &csarg, cli.cells).width;
         vcol += incr;
-        ci = utfc_next(ci);
+        ci = cli.next;
       }
       bdp->end_vcol = vcol;
       pend = ci.ptr;
@@ -3412,8 +3418,11 @@ static VisualIns op_ins_visual(oparg_T *oap, cmdarg_T *cap)
   if (is_ex_cmdchar(cap) || cap->cmdchar == K_LUA) {
     return kVInsMotion;  // An omap selected it (Lua, or ":norm"): redo replays the omap.
   }
+  if (op_self_select(cap) && cap->nchar != 'v' && oap->motion_force == NUL) {
+    return kVInsMotion;  // "gn" searches from the cursor: redo replays it per-cursor.
+  }
   if (oap->motion_force != NUL || op_self_select(cap)) {
-    // A self-selecting motion (gn/gN/gv) or a forced-motion operator: redo replays its keys.
+    // A self-selecting motion ("gv") or a forced-motion operator: redo replays its keys.
     return kVInsOther;
   }
   // Unreplayable (void/absent/"gv") selection: the redo falls back to an equal-size reselect ("1v").
@@ -3428,6 +3437,7 @@ void do_pending_operator(cmdarg_T *cap, int old_col, bool gui_yank)
   int lbr_saved = curwin->w_p_lbr;
 
   pos_T old_cursor = curwin->w_cursor;
+  const pos_T op_origin = oap->start;  // Where the operator started (before the motion).
 
   // If an operation is pending, handle it...
   if ((finish_op
@@ -3469,7 +3479,9 @@ void do_pending_operator(cmdarg_T *cap, int old_col, bool gui_yank)
     atom_capture_op(oap, cap, redo_yank);
 
     if (Visual.active) {
-      if (!gui_yank) {
+      if (!gui_yank
+          // Not if the operator target made the Visual area ("cgn", "d<C-v>j"). #40949
+          && !finish_op) {
         // Save the current Visual area for '< and '> marks, and "gv"
         curbuf->b_visual = visualinfo();
         restore_visual_mode();
@@ -3883,6 +3895,12 @@ void do_pending_operator(cmdarg_T *cap, int old_col, bool gui_yank)
     case OP_FOLD:
       Visual.reselect = false;          // don't reselect now
       foldCreate(curwin, oap->start, oap->end);
+      break;
+
+    case OP_MCURSOR:
+      // Restore linebreak, so that the steps move like typed motions ("gj").
+      restore_lbr(lbr_saved);
+      mc_zq(oap, cap, op_origin);
       break;
 
     case OP_FOLDOPEN:

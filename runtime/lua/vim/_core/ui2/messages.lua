@@ -32,11 +32,12 @@ local M = {
     dupe = 0, -- Number of times message is repeated.
   },
   virt = { -- Stored virt_text state.
-    last = { {}, {}, {}, {} }, ---@type MsgContent[] status in last cmdline row.
-    cmd = { {}, {} }, ---@type MsgContent[] # [(x)] indicators in cmd window.
-    msg = { {}, {} }, ---@type MsgContent[] # [(x)] indicators in msg window.
-    top = { {} }, ---@type MsgContent[] # [+x] top indicator in dialog window.
-    bot = { {} }, ---@type MsgContent[] # [+x] bottom indicator in dialog window.
+    ---@type [MsgContent, MsgContent, MsgContent, MsgContent]
+    last = { {}, {}, {}, {} }, -- Status in last cmdline row.
+    cmd = { {}, {} }, ---@type [MsgContent, MsgContent] # [(x)] indicators in cmd window.
+    msg = { {}, {} }, ---@type [MsgContent, MsgContent] # [(x)] indicators in msg window.
+    top = { {} }, ---@type [MsgContent] # [+x] top indicator in dialog window.
+    bot = { {} }, ---@type [MsgContent] # [+x] bottom indicator in dialog window.
     idx = { mode = 1, search = 2, cmd = 3, ruler = 4, spill = 1, dupe = 2 },
     ids = {}, ---@type { ['last'|'cmd'|'msg'|'top'|'bot']: integer? } Table of mark IDs.
     delayed = false, -- Whether placement of 'last' virt_text is delayed.
@@ -50,7 +51,8 @@ local mopt = { maxrows = 0, msgsep = ' ', pager = nil, timeout = 4000 } ---@type
 
 --- Resolves the option values used by this module.
 function M.on_option_changed()
-  mopt.msgsep = vim.opt.fcs:get().msgsep or ' '
+  local fcs = assert(vim.opt.fcs:get())
+  mopt.msgsep = fcs.msgsep or ' '
   local v = vim.opt.messagesopt:get() --[[@as table<string,string|boolean>]]
   mopt.maxrows = math.ceil(o.lines * (tonumber(v.maxheight) or 50) / 100)
   mopt.timeout = tonumber(v.timeout) or 4000
@@ -87,12 +89,15 @@ function M.msg:start_timer(buf, id)
     if not mark or not mark[1] then
       return
     end
+    -- Message span marks are created with both endpoints in show_msg().
+    local details = assert(mark[3])
+    local end_row, end_col = assert(details.end_row), assert(details.end_col)
     -- Clear prev_msg when line that may have dupe marker is removed.
     local erow = api.nvim_buf_line_count(buf) - 1
-    self.prev_msg = mark[3].end_row == erow and '' or self.prev_msg
+    self.prev_msg = end_row == erow and '' or self.prev_msg
 
     -- Remove message (including potentially leftover empty line).
-    api.nvim_buf_set_text(buf, mark[1], mark[2], mark[3].end_row, mark[3].end_col, {})
+    api.nvim_buf_set_text(buf, mark[1], mark[2], end_row, end_col, {})
     if api.nvim_buf_get_lines(buf, mark[1], mark[1] + 1, false)[1] == '' then
       api.nvim_buf_set_lines(buf, mark[1], mark[1] + 1, false, {})
     end
@@ -116,7 +121,8 @@ local function set_virttext(type, tgt)
   end
 
   -- Concatenate the components of M.virt[type] and calculate the concatenated width.
-  local width, chunks = 0, {} ---@type integer, [string, integer|string][]
+  local width = 0 ---@type integer
+  local chunks = {} ---@type [string, (integer|string)?][]
   local contents = M.virt[type] ---@type MsgContent[]
   for _, content in ipairs(contents) do
     for _, chunk in ipairs(content) do
@@ -165,9 +171,12 @@ local function set_virttext(type, tgt)
 
       -- Give virt_text without its own highlight the same highlight as the message tail.
       local pos, opts = { row, col }, { details = true, overlap = true, type = 'highlight' }
-      local hl = api.nvim_buf_get_extmarks(ui.bufs[tgt], ui.ns, pos, pos, opts)
-      for _, chunk in ipairs(hl[1] and chunks or {}) do
-        chunk[2] = chunk[2] or hl[1][4].hl_group
+      local hl = api.nvim_buf_get_extmarks(ui.bufs[tgt], ui.ns, pos, pos, opts)[1]
+      if hl then
+        local details = assert(hl[4])
+        for _, chunk in ipairs(chunks) do
+          chunk[2] = chunk[2] or details.hl_group
+        end
       end
     else
       local mode = #M.virt.last[M.virt.idx.mode]
@@ -228,6 +237,7 @@ local function pager_shown()
   return api.nvim_win_is_valid(ui.wins.pager) and not api.nvim_win_get_config(ui.wins.pager).hide
 end
 
+---@type vim.api.keyset.set_extmark
 local hlopts = { undo_restore = false, invalidate = true, priority = 1, strict = false }
 --- Move messages to expanded cmdline, dialog or pager to show in full.
 --- Return updated target+buffer in case it differs from 'src'.
@@ -257,8 +267,9 @@ function M.expand_msg(src, tgt, focus)
     local srow = (not hidden and tgt == 'pager') and api.nvim_buf_line_count(ui.bufs.pager) or 0
     api.nvim_buf_set_lines(ui.bufs[tgt], srow, -1, false, lines)
     for _, m in ipairs(marks) do
+      local details = assert(m[4])
       hlopts.hl_group, hlopts.end_col, hlopts.end_row =
-        m[4].hl_group, m[4].end_col, srow + m[4].end_row
+        details.hl_group, details.end_col, details.end_row and srow + details.end_row
       api.nvim_buf_set_extmark(ui.bufs[tgt], ui.ns, srow + m[2], m[3], hlopts)
     end
   else
@@ -318,12 +329,14 @@ function M.show_msg(tgt, kind, content, replace_last, append, id)
     or (api.nvim_buf_line_count(buf) - ((replace_last or cr or append) and 1 or 0))
   local curline = (cr or append) and api.nvim_buf_get_lines(buf, row, row + 1, false)[1]
   col = mark[2] or (append and not cr and math.min(col, #curline) or 0)
+  --- EmmyLuaLs/emmylua-analyzer-rust#1269
+  --- @type integer, integer, integer
   local start_row, start_col, lines = row, col, o.lines
 
   local function set_target_pos()
     if tgt == 'msg' then
       local width_cmd = [[echo max(map(range(1, line('$')), 'virtcol([v:val, "$"])'))]]
-      local width = tonumber(fn.win_execute(ui.wins.msg, width_cmd)) - 1
+      local width = vim._assert_integer(fn.win_execute(ui.wins.msg, width_cmd)) - 1
       api.nvim_win_resize(ui.wins.msg, width, -1)
       local texth = api.nvim_win_text_height(ui.wins.msg, { start_row = start_row, end_row = row })
       if texth.all > math.ceil(lines * 0.5) then
@@ -437,12 +450,13 @@ function M.show_msg(tgt, kind, content, replace_last, append, id)
   end
 end
 
+---@alias MsgChunk [integer, string, integer?]
+---@alias MsgContent MsgChunk[]
+
 local in_pager = false -- Whether the pager is or will be the current window.
 --- Route the message to the appropriate sink.
 ---
 ---@param kind string
----@alias MsgChunk [integer, string, integer]
----@alias MsgContent MsgChunk[]
 ---@param content MsgContent
 ---@param replace_last boolean
 --@param history boolean
@@ -451,10 +465,13 @@ local in_pager = false -- Whether the pager is or will be the current window.
 ---@param trigger string
 function M.msg_show(kind, content, replace_last, _, append, id, trigger)
   -- Match configured target mappings as Lua pattern to ID:
-  local k, v, id_target = next(type(id) == 'string' and ui.cfg.msg.targets or {})
-  while k and not id_target do
-    id_target = id:match(k) and v
-    k, v = next(ui.cfg.msg.targets, k)
+  local id_target ---@type 'cmd'|'msg'|'pager'|nil
+  if type(id) == 'string' then
+    local k, v = next(ui.cfg.msg.targets)
+    while k and not id_target do
+      id_target = id:match(k) and v
+      k, v = next(ui.cfg.msg.targets, k)
+    end
   end
 
   -- Set the entered search command in the cmdline (if available).
@@ -481,10 +498,13 @@ function M.msg_show(kind, content, replace_last, _, append, id, trigger)
     -- Extract only the search_count, not the entered search command.
     -- Match any of search.c:cmdline_search_stat():' [(x | >x | ?)/(y | >y | ??)]'
     content = { content[#content] }
-    content[1][2] = content[1][2]:match('W? %[>?%d*%??/>?%d*%?*%]') .. '  '
-    M.virt.last[M.virt.idx.search] = content
-    M.virt.last[M.virt.idx.cmd] = { { 0, (' '):rep(11) } }
-    set_virttext('last', 'cmd')
+    local stat = content[1][2]:match('W? %[>?%d*%??/>?%d*%?*%]')
+    if stat then
+      content[1][2] = stat .. '  '
+      M.virt.last[M.virt.idx.search] = content
+      M.virt.last[M.virt.idx.cmd] = { { 0, (' '):rep(11) } }
+      set_virttext('last', 'cmd')
+    end
   elseif (ui.cmd.prompt or (ui.cmd.level > 0 and tgt == 'cmd')) and ui.cmd.srow == 0 then
     -- Route to dialog when a prompt is active, or message would overwrite active cmdline.
     replace_last = api.nvim_win_get_config(ui.wins.dialog).hide or kind == 'wildlist'
@@ -677,7 +697,8 @@ local function dialog_on_key(_, typed)
     -- Keep Normal commands for screen-relative H/L and page scrolling behavior.
     fn.win_execute(ui.wins.dialog, ('exe "norm! %s"'):format(map[typed]))
     set_top_bot_spill()
-    return fn.getwininfo(ui.wins.dialog)[1].topline ~= info.topline and '' or nil
+    local updated = fn.getwininfo(ui.wins.dialog)[1]
+    return updated and updated.topline ~= info.topline and '' or nil
   end
 end
 
@@ -727,9 +748,13 @@ local function enter_pager()
         in_pager = api.nvim_get_current_win() == ui.wins.pager
       end
       in_pager = in_pager and api.nvim_win_is_valid(ui.wins.pager)
+      --- @type vim.api.keyset.win_config
       local cfg = in_pager and { relative = 'laststatus', col = 0 } or { hide = true }
       if in_pager then
-        cfg.row, cfg.height, cfg.border = win_row_height_border('pager', height)
+        local has_border
+        cfg.row, cfg.height, has_border = win_row_height_border('pager', height)
+        cfg.border = has_border and { '', { mopt.msgsep, 'MsgSeparator' }, '', '', '', '', '', '' }
+          or 'none'
       else
         pcall(api.nvim_set_option_value, 'eiw', 'all', { scope = 'local', win = ui.wins.pager })
         api.nvim_del_autocmd(id)
@@ -753,8 +778,9 @@ function M.set_pos(tgt, focus)
       local top = { mopt.msgsep, 'MsgSeparator' }
       ---@type vim.api.keyset.win_config
       local cfg = { hide = false, relative = 'laststatus', col = 10000 }
-      cfg.row, cfg.height, cfg.border = win_row_height_border(t, texth.all)
-      cfg.border = cfg.border and t ~= 'msg' and { '', top, '', '', '', '', '', '' } or nil
+      local has_border
+      cfg.row, cfg.height, has_border = win_row_height_border(t, texth.all)
+      cfg.border = has_border and t ~= 'msg' and { '', top, '', '', '', '', '', '' } or nil
       cfg.mouse = tgt == 'cmd' or t == 'msg' or nil
       api.nvim_win_set_config(win, cfg)
       api.nvim_win_set_cursor(win, { 1, 0 })

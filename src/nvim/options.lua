@@ -3848,6 +3848,20 @@ local options = {
       type = 'expr',
     },
     {
+      cb = 'did_set_follow',
+      defaults = false,
+      desc = [=[
+        Enables |multicursor| follow-mode: cursor-relative motions performed
+        by the primary cursor, cascade to all cursors.  Toggled by |q=|
+        (buffer-local).
+      ]=],
+      full_name = 'follow',
+      scope = { 'buf' },
+      short_desc = N_('multicursor: motions cascade to all cursors'),
+      type = 'boolean',
+      varname = 'p_follow',
+    },
+    {
       abbreviation = 'fex',
       defaults = '',
       desc = [=[
@@ -5057,25 +5071,15 @@ local options = {
       abbreviation = 'isi',
       cb = 'did_set_isopt',
       validation_cb = 'validate_isopt',
-      defaults = {
-        condition = 'MSWIN',
-        if_false = '@,48-57,_,192-255',
-        if_true = '@,48-57,_,128-167,224-235',
-        doc = [[for Windows:
-                    "@,48-57,_,128-167,224-235"
-         otherwise: "@,48-57,_,192-255"]],
-      },
+      defaults = '@,48-57,_,192-255',
       deny_duplicates = true,
       desc = [=[
         The characters given by this option are included in identifiers.
-        Identifiers are used in recognizing environment variables and after a
-        match of the 'define' option.  It is also used for "\i" in a
-        |pattern|.  See 'isfname' for a description of the format of this
-        option.  For '@' only characters up to 255 are used.
-        Careful: If you change this option, it might break expanding
-        environment variables.  E.g., when '/' is included and Vim tries to
-        expand "$HOME/.local/state/nvim/shada/main.shada".  Maybe you should
-        change 'iskeyword' instead.
+        Identifiers are used after a match of the 'define' option.  It is also
+        used for "\i" in a |pattern|.  See 'isfname' for a description of the
+        format of this option.  For '@' only characters up to 255 are used.
+
+        Does not affect environment variable names |expr-env|.
       ]=],
       full_name = 'isident',
       list = 'comma',
@@ -5119,45 +5123,14 @@ local options = {
     },
     {
       abbreviation = 'isp',
-      cb = 'did_set_isopt',
-      validation_cb = 'validate_isopt',
       defaults = '@,161-255',
       deny_duplicates = true,
-      desc = [=[
-        The characters given by this option are displayed directly on the
-        screen.  It is also used for "\p" in a |pattern|.  The characters from
-        space (ASCII 32) to '~' (ASCII 126) are always displayed directly,
-        even when they are not included in 'isprint' or excluded.  See
-        'isfname' for a description of the format of this option.
-
-        Non-printable characters are displayed with two characters:
-        	  0 -  31	"^@" - "^_"
-        	 32 - 126	always single characters
-        	   127		"^?"
-        	128 - 159	"~@" - "~_"
-        	160 - 254	"| " - "|~"
-        	   255		"~?"
-        Illegal bytes from 128 to 255 (invalid UTF-8) are
-        displayed as <xx>, with the hexadecimal value of the byte.
-        When 'display' contains "uhex" all unprintable characters are
-        displayed as <xx>.
-        The SpecialKey highlighting will be used for unprintable characters.
-        |hl-SpecialKey|
-
-        Multi-byte characters 256 and above are always included, only the
-        characters up to 255 are specified with this option.  When a character
-        is printable but it is not available in the current font, a
-        replacement character will be shown.
-        Unprintable and zero-width Unicode characters are displayed as <xxxx>.
-        There is no option to specify these characters.
-      ]=],
       full_name = 'isprint',
       list = 'comma',
-      redraw = { 'all_windows' },
       scope = { 'global' },
       short_desc = N_('printable characters'),
       type = 'string',
-      varname = 'p_isp',
+      immutable = true,
     },
     {
       abbreviation = 'js',
@@ -9353,6 +9326,9 @@ local options = {
               applied to StatusLineNC for the statusline of non-current
               windows.
               The number N must be between 1 and 9.  See |hl-User1..9|
+        #( -  Start of a highlight scope.  The exact highlighting before the
+              scope is reset at the end.  No width fields allowed.
+        #) -  End of highlight scope.  No width fields allowed.
 
         When displaying a flag, Vim removes the leading comma, if any, when
         that flag comes right after plaintext.  This will make a nice display

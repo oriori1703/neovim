@@ -165,7 +165,7 @@ local detect = setmetatable({}, {
   --- @return function
   __index = function(t, k)
     t[k] = function(...)
-      return require('vim.filetype.detect')[k](...)
+      return assert(require('vim.filetype.detect')[k])(...)
     end
     return t[k]
   end,
@@ -646,6 +646,7 @@ local extension = {
   mcs = 'hex',
   hip = 'hip',
   hjson = 'hjson',
+  hlsl = 'hlsl',
   m3u = 'hlsplaylist',
   m3u8 = 'hlsplaylist',
   hog = 'hog',
@@ -669,6 +670,7 @@ local extension = {
   hylo = 'hylo',
   iba = 'ibasic',
   ibi = 'ibasic',
+  ics = 'icalendar',
   icn = 'icon',
   idl = detect.idl,
   idr = 'idris2',
@@ -2619,6 +2621,8 @@ local pattern = {
     ['^dictd.*%.conf$'] = 'dictdconf',
     ['/%.?gnuradio/.*%.conf$'] = 'confini',
     ['/gnuradio/conf%.d/.*%.conf$'] = 'confini',
+    ['/portage/binrepos%.conf/.*%.conf$'] = 'confini',
+    ['/portage/repos%.conf/.*%.conf$'] = 'confini',
     ['/lxqt/.*%.conf$'] = 'dosini',
     ['/screengrab/.*%.conf$'] = 'dosini',
     ['/%.config/fd/ignore$'] = 'gitignore',
@@ -2630,6 +2634,8 @@ local pattern = {
     ['^named.*%.conf$'] = 'named',
     ['^rndc.*%.conf$'] = 'named',
     ['/openvpn/.*/.*%.conf$'] = 'openvpn',
+    ['/portage/make%.conf/.*%.conf$'] = 'sh',
+    ['/portage/make%.conf$'] = 'sh',
     ['/pipewire/.*%.conf$'] = 'spajson',
     ['/wireplumber/.*%.conf$'] = 'spajson',
     ['/%.ssh/.*%.conf$'] = 'sshconfig',
@@ -2882,7 +2888,7 @@ local pattern = {
     ['/app%-defaults/'] = starsetf('xdefaults'),
     ['^Xresources'] = starsetf('xdefaults'),
     -- Increase priority to run before the pattern below
-    ['^XF86Config%-4'] = starsetf(detect.xfree86_v4, -math.huge + 1),
+    ['^XF86Config%-4'] = starsetf(detect.xfree86_v4, (-math.huge + 1) --[[@as integer]]),
     ['^XF86Config'] = starsetf(detect.xfree86_v3),
     ['Xmodmap$'] = 'xmodmap',
     ['xmodmap'] = starsetf('xmodmap'),
@@ -2964,7 +2970,7 @@ local function normalize_path(path, as_pattern)
     if as_pattern then
       -- Escape Lua's metacharacters when $HOME is used in a pattern.
       -- The rest of path should already be properly escaped.
-      normal = vim.pesc(vim.env.HOME) .. normal:sub(2)
+      normal = vim.pesc(assert(vim.env.HOME)) .. normal:sub(2)
     else
       normal = vim.env.HOME .. normal:sub(2) --- @type string
     end
@@ -3352,6 +3358,7 @@ function M.match(args)
       local ok, ft, on_detect = pcall(
         require('vim.filetype.detect').match_contents,
         contents,
+        --- @diagnostic disable-next-line: param-type-mismatch
         name,
         function(ext)
           return dispatch(extension[ext], name, bufnr)
@@ -3401,7 +3408,11 @@ end
 --- whether a certain extension, filename, or pattern has been registered so far. In addition, the
 --- `pattern` table is in an internal format optimized for fast lookup. Prefer |vim.filetype.match()|
 --- for checking the detected filetype for a given pattern.
----@return table<string, table<string, vim.filetype.mapping|table<string, vim.filetype.mapping>>>
+--- @return {
+---   extension: vim.filetype.mapping,
+---   filename: vim.filetype.mapping,
+---   pattern: table<string, vim.filetype.mapping>
+--- }
 function M.inspect()
   return {
     extension = vim.deepcopy(extension),

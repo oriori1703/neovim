@@ -15,7 +15,7 @@ end
 local function git_cmd(cmd, cwd)
   cmd = vim.list_extend({ 'git', '-c', 'gc.auto=0' }, cmd)
   local env = vim.fn.environ() --- @type table<string,string>
-  env.GIT_DIR, env.GIT_WORK_TREE = nil, nil
+  env.GIT_DIR, env.GIT_WORK_TREE, env.GIT_INDEX_FILE = nil, nil, nil
   local sys_opts = { cwd = cwd, text = true, env = env, clear_env = true }
   local out = vim.system(cmd, sys_opts):wait() --- @type vim.SystemCompleted
   if out.code ~= 0 then
@@ -174,6 +174,7 @@ local function check_lockfile()
     return
   end
 
+  --- @cast text string
   local can_parse, data = pcall(vim.json.decode, text)
   if not can_parse then
     health.error(('Could not parse lockfile: %s\nDelete it and restart Nvim'):format(data))
@@ -289,8 +290,9 @@ local function check_installed_plugin(plug_name)
     health.error('Could not get `vim.pack` usage information for plugin ' .. name_str)
     return false
   end
+  local plug = assert(info[1])
 
-  if not info[1].active then
+  if not plug.active then
     health.info(
       ('Plugin %s is not active.'):format(name_str)
         .. ' Is it lazy loaded or did you forget to run `vim.pack.del()`?'
@@ -298,8 +300,8 @@ local function check_installed_plugin(plug_name)
   end
 
   -- Manifest
-  if info[1].manifest then
-    return check_manifest(info[1].manifest, plug_name, plug_path)
+  if plug.manifest then
+    return check_manifest(plug.manifest, plug_name, plug_path)
   end
 
   return true

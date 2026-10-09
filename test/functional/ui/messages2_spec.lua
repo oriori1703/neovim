@@ -475,14 +475,14 @@ describe('messages2', function()
     feed('Vj')
     screen:expect([[
       {17:one two}                                              |
-      ^t{17:hree four}                                           |
+      {17:^three four}                                           |
       {1:~                                                    }|*11
       {5:-- VISUAL LINE --}                                    |
     ]])
     feed('g<C-G>')
     screen:expect([[
       {17:one two}                                              |
-      ^t{17:hree four}                                           |
+      {17:^three four}                                           |
       {1:~                                                    }|*11
       Selected 2 of 2 Lines; 4 of 4 Words; 19 of 19 Bytes  |
     ]])
@@ -1288,6 +1288,21 @@ describe('messages2', function()
       bar                                                  |
       {1:~                                                    }|*11
       -----------------------------------1,1            All|
+    ]])
+  end)
+
+  it('search offset with semicolon #41929', function()
+    command(
+      'set shortmess-=S | call setline(1, ["odd line", "even line", "odd line", "even line"])'
+    )
+    feed('/even/;/even<CR>')
+    screen:expect([[
+      odd line                                             |
+      {10:even} line                                            |
+      odd line                                             |
+      {10:^even} line                                            |
+      {1:~                                                    }|*9
+      /even                              [2/2]             |
     ]])
   end)
 

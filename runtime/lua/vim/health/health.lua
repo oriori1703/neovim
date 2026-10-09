@@ -188,7 +188,7 @@ end
 
 -- Note: this is part of check_performance().
 local function check_watchers()
-  local a = vim._watch.active
+  local a = vim._watch.active()
   local total = a.watch + a.watchdirs + a.inotify
   health.info(
     ('Filewatchers (vim._watch): %d (watch=%d, watchdirs=%d, inotify=%d)'):format(
@@ -333,7 +333,7 @@ local function check_rplugin_manifest()
       return
     end
 
-    local python_dir = python_glob[1]
+    local python_dir = assert(python_glob[1])
     local python_version = vim.fs.basename(python_dir)
 
     --- @type string[]
@@ -463,7 +463,7 @@ local function check_tmux()
       { '$TERM may have been set by some rc (.bashrc, .zshrc, ...).' }
     )
   elseif
-    not vim.regex([[\v(tmux-256color|tmux-direct|screen-256color)]]):match_str(vim.env.TERM)
+    not vim.regex([[\v(tmux-256color|tmux-direct|screen-256color)]]):match_str(assert(vim.env.TERM))
   then
     health.error(
       '$TERM should be "screen-256color", "tmux-256color", or "tmux-direct" in tmux. Colors might look wrong.',
@@ -574,7 +574,7 @@ local function check_external_tools()
     local rg_path = vim.fn.exepath('rg')
     local rg_job = run_system({ rg_path, '-V' })
     if rg_job.code == 0 then
-      health.ok(('%s (%s)'):format(vim.trim(rg_job.stdout), rg_path))
+      health.ok(('%s (%s)'):format(vim.trim(assert(rg_job.stdout)), rg_path))
     else
       health.warn('found `rg` but failed to run `rg -V`', { rg_job.stderr })
     end
@@ -641,16 +641,18 @@ local function check_external_tools()
         'http_proxy',
         'all_proxy',
         'no_proxy',
-      }) do
-        ---@type string?
-        local val = vim.env[var] or vim.env[var:upper()]
+      } --[[@as string[] ]]) do
+        local val = vim.env[var]
+        if not val then
+          var = var:upper()
+          val = vim.env[var]
+        end
         if val then
           if not added_env_header then
             table.insert(lines, 'curl-related environment variables:')
             added_env_header = true
           end
-          local shown_var = vim.env[var] and var or var:upper()
-          table.insert(lines, string.format('  %s=%s', shown_var, val))
+          table.insert(lines, string.format('  %s=%s', var, val))
         end
       end
 
@@ -729,7 +731,7 @@ local function check_head_hash(commit)
     return
   end
 
-  local refs = {} ---@type table<string, string>
+  local refs = {} ---@type table<string, string?>
   for line in output:gmatch('[^\n]+') do
     local sha, ref = line:match('^(%x+)%s+(%S+)$')
     if sha and ref then
@@ -760,9 +762,9 @@ local function check_sysinfo()
   vim.health.start('System Info')
 
   -- Use :version because `vim.version().build` returns "Homebrew" for brew installs.
-  local version_out = vim.api.nvim_exec2('version', { output = true }).output
+  local version_out = vim.api.nvim_exec2('version', { output = true }).output --[[@as string]]
   local nvim_version = version_out:match('NVIM (v[^\n]+)') or 'unknown'
-  local commit --[[@type string]] = (version_out:match('%+g(%x+)') or ''):sub(1, 12)
+  local commit = (version_out:match('%+g(%x+)') or ''):sub(1, 12)
 
   if vim.fn.executable('git') ~= 1 then
     vim.health.warn('Cannot check for updates: git not found')
