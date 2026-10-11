@@ -1912,7 +1912,8 @@ Lua module: vim.lsp.client                                        *lsp-client*
                                an RPC client (or an in-process |lsp-server|).
                                Function receives a `dispatchers` table and the
                                resolved `config`, and must return an object in
-                               the form of |vim.lsp.rpc.Client|.
+                               the form of |vim.lsp.rpc.Client| that calls
+                               `dispatchers.on_exit` when the server exits.
 
                                Example (list): >lua
                                    cmd = { 'flow', 'lsp' }
@@ -2085,6 +2086,9 @@ Client:request({method}, {params}, {handler}, {bufnr})
 
     This is a thin wrapper around {client.rpc.request} with some additional
     checks for capabilities and handler availability.
+
+    Once the request was sent, `handler` is always invoked: with the server's
+    reply, or with a `ServerExited` error if the server exits first.
 
     Parameters: ~
       • {method}   (`string`) LSP method name.

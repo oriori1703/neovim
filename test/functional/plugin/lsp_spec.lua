@@ -1315,6 +1315,88 @@ describe('LSP', function()
       }
     end)
 
+    it('fails pending requests when the server exits', function()
+      test_rpc_server {
+        test_name = 'exit_with_pending_request',
+        on_init = function()
+          command('let g:requests = 0')
+          command('autocmd LspRequest * let g:requests+=1')
+          exec_lua(function()
+            _G.TEST_RPC_CLIENT:request('slow_request', nil, function(err, result, ctx)
+              _G.pending_reply = { err = err, result = result, request_id = ctx.request_id }
+            end)
+          end)
+          eq(1, eval('g:requests'))
+        end,
+        on_exit = function(code, signal)
+          eq(0, code, 'exit code')
+          eq(0, signal, 'exit signal')
+          eq(
+            { err = { code = -32900, message = 'server exited' }, request_id = 2 },
+            exec_lua(function()
+              assert(vim.wait(1000, function()
+                return _G.pending_reply ~= nil
+              end))
+              return _G.pending_reply
+            end)
+          )
+          eq(2, eval('g:requests'))
+          eq(
+            nil,
+            exec_lua(function()
+              return _G.TEST_RPC_CLIENT.requests[2]
+            end)
+          )
+        end,
+      }
+    end)
+
+    it('fails pending requests when an in-process server exits', function()
+      eq(
+        { { err = { code = -32900, message = 'server exited' }, request_id = 2 }, true },
+        exec_lua(function()
+          local function server(dispatchers)
+            local srv = {}
+            local request_id = 0
+            function srv.request(method, _params, callback, notify_reply_callback)
+              request_id = request_id + 1
+              if method == 'initialize' then
+                callback(nil, { capabilities = {} })
+              elseif method == 'shutdown' then
+                callback(nil, nil)
+              end
+              -- 'slow_request' is never answered.
+              if method ~= 'slow_request' and notify_reply_callback then
+                notify_reply_callback(request_id)
+              end
+              return true, request_id
+            end
+            function srv.notify(method)
+              if method == 'exit' then
+                dispatchers.on_exit(0, 15)
+              end
+            end
+            function srv.is_closing()
+              return false
+            end
+            function srv.terminate() end
+            return srv
+          end
+
+          local client = assert(vim.lsp.get_client_by_id(assert(vim.lsp.start({ cmd = server }))))
+          local reply --- @type table?
+          assert(client:request('slow_request', nil, function(err, result, ctx)
+            reply = { err = err, result = result, request_id = ctx.request_id }
+          end))
+          client:stop()
+          assert(vim.wait(1000, function()
+            return reply ~= nil
+          end))
+          return { reply, client.requests[reply.request_id] == nil }
+        end)
+      )
+    end)
+
     it('request should not be pending for sync responses (in-process LS)', function()
       --- @type boolean
       local pending_request = exec_lua(function()

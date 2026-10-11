@@ -178,6 +178,8 @@ local constants = {
     ContentModified = -32801,
     ServerCancelled = -32802,
     RequestFailed = -32803,
+    -- Defined by Nvim: the server exited before replying to the request.
+    ServerExited = -32900,
   },
 
   -- Describes the content type that a client supports in various

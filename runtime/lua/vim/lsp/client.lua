@@ -58,7 +58,8 @@ end
 --- Command `string[]` that launches the language server (treated as in |jobstart()|, must be
 --- absolute or on `$PATH`, shell constructs like "~" are not expanded), or function that creates an
 --- RPC client (or an in-process |lsp-server|). Function receives a `dispatchers` table and the
---- resolved `config`, and must return an object in the form of |vim.lsp.rpc.Client|.
+--- resolved `config`, and must return an object in the form of |vim.lsp.rpc.Client| that calls
+--- `dispatchers.on_exit` when the server exits.
 ---
 --- Example (list):
 --- ```lua
@@ -223,6 +224,9 @@ end
 --- "complete" ephemerally while executing |LspRequest| autocmds when replies
 --- are received from the server.
 --- @field requests table<integer,{ type: string, bufnr: integer, method: vim.lsp.protocol.Method}?>
+---
+--- Reply callbacks of the pending requests, to fail when the server exits.
+--- @field private _request_callbacks table<integer,fun(err: lsp.ResponseError?, result: any, request_id: integer)>
 ---
 --- See [vim.lsp.ClientConfig].
 --- @field root_dir string?
@@ -426,6 +430,7 @@ function Client.create(config)
     _log_prefix = string.format('LSP[%s]', name),
     _glob_cache = {},
     requests = {},
+    _request_callbacks = {},
     attached_buffers = {},
     server_capabilities = {},
     registrations = {},
@@ -741,6 +746,9 @@ end
 --- This is a thin wrapper around {client.rpc.request} with some additional
 --- checks for capabilities and handler availability.
 ---
+--- Once the request was sent, `handler` is always invoked: with the server's reply, or with a
+--- `ServerExited` error if the server exits first.
+---
 --- @param method vim.lsp.protocol.Method.ClientToServer.Request LSP method name.
 --- @param params? table LSP request params.
 --- @param handler? lsp.Handler Response |lsp-handler| for this method.
@@ -766,8 +774,11 @@ function Client:request(method, params, handler, bufnr)
   local already_responded = false
   local request_registered = false
 
-  -- NOTE: rpc.request might call an in-process (Lua) server, thus may be synchronous.
-  local success, request_id = self.rpc.request(method, params, function(err, result, id)
+  local function callback(err, result, id)
+    already_responded = true
+    if id then
+      self._request_callbacks[id] = nil
+    end
     handler(err, result, {
       method = method,
       client_id = self.id,
@@ -776,8 +787,12 @@ function Client:request(method, params, handler, bufnr)
       params = params,
       version = version,
     })
-  end, function(id)
+  end
+
+  -- NOTE: rpc.request might call an in-process (Lua) server, thus may be synchronous.
+  local success, request_id = self.rpc.request(method, params, callback, function(id)
     -- Called when the server sends a response to the request (including cancelled acknowledgment).
+    self._request_callbacks[id] = nil
     if request_registered then
       self:_process_request(id, 'complete')
     end
@@ -787,6 +802,7 @@ function Client:request(method, params, handler, bufnr)
   if success and request_id and not already_responded then
     self:_process_request(request_id, 'pending', bufnr, method)
     request_registered = true
+    self._request_callbacks[request_id] = callback
   end
 
   return success, request_id
@@ -1501,6 +1517,18 @@ function Client:_on_exit(code, signal)
   end
 
   vim.schedule(function()
+    -- Fail the requests still waiting for a reply: none will come.
+    local err = { code = lsp.protocol.ErrorCodes.ServerExited, message = 'server exited' }
+    for id, callback in vim.spairs(self._request_callbacks) do
+      if self.requests[id] then
+        self:_process_request(id, 'complete')
+      end
+      local ok, cb_err = pcall(callback, err, nil, id)
+      if not ok then
+        self:_on_error(lsp.rpc.client_errors.SERVER_RESULT_CALLBACK_ERROR, cb_err)
+      end
+    end
+
     for bufnr in pairs(self.attached_buffers) do
       self:_on_detach(bufnr)
       if #lsp.get_clients({ bufnr = bufnr, _uninitialized = true }) == 0 then

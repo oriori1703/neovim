@@ -489,6 +489,20 @@ function tests.check_tracked_requests_cleared()
   }
 end
 
+function tests.exit_with_pending_request()
+  skeleton {
+    on_init = function(_)
+      return { capabilities = {} }
+    end,
+    body = function()
+      local msg = read_message()
+      assert_eq('slow_request', msg.method)
+      -- Leave the request unanswered.
+      os.exit(0)
+    end,
+  }
+end
+
 function tests.basic_finish()
   skeleton {
     on_init = function(params)

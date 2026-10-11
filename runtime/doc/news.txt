@@ -28,7 +28,9 @@ EXPERIMENTS
 
 LSP
 
-• todo
+• Request handlers are always invoked: a request still pending when the
+  server exits now fails with a `ServerExited` error instead of never
+  completing. |Client:request()|
 
 LUA
 
