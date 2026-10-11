@@ -1912,7 +1912,9 @@ Lua module: vim.lsp.client                                        *lsp-client*
                                an RPC client (or an in-process |lsp-server|).
                                Function receives a `dispatchers` table and the
                                resolved `config`, and must return an object in
-                               the form of |vim.lsp.rpc.Client|.
+                               the form of |vim.lsp.rpc.Client|, including
+                               failing pending request callbacks with a
+                               `ServerExited` error when the server exits.
 
                                Example (list): >lua
                                    cmd = { 'flow', 'lsp' }
@@ -2739,7 +2741,10 @@ Lua module: vim.lsp.rpc                                              *lsp-rpc*
       • {notify}      (`fun(method: string, params: any): boolean`) Sends a
                       notification to the LSP server.
       • {request}     (`fun(method: string, params: table?, callback: fun(err?: lsp.ResponseError, result: any, request_id: integer), notify_reply_callback?: fun(message_id: integer)):boolean,integer?`)
-                      Sends a request to the LSP server.
+                      Sends a request to the LSP server. `callback` is always
+                      invoked once the request was sent: with the server's
+                      reply, or with a `ServerExited` error if the server
+                      exits first.
       • {terminate}   (`fun()`) Terminates the RPC client.
 
 

@@ -268,7 +268,8 @@ end
 --- @field private message_stream vim.net.MessageStream
 --- @field private dispatchers vim.lsp.rpc.Dispatchers
 ---
---- Sends a request to the LSP server.
+--- Sends a request to the LSP server. `callback` is always invoked once the request was sent:
+--- with the server's reply, or with a `ServerExited` error if the server exits first.
 --- @field request fun(method: vim.lsp.protocol.Method.ClientToServer.Request, params: table?, callback: fun(err?: lsp.ResponseError, result: any, request_id: integer), notify_reply_callback?: fun(message_id: integer)):boolean,integer?
 ---
 --- Sends a notification to the LSP server.
@@ -346,8 +347,32 @@ function Client.new(dispatchers, transport, decode, format)
   transport:listen(function(err, data)
     ---@diagnostic disable-next-line: invisible
     self.message_stream:feed(err, data)
-  end, dispatchers.on_exit)
+  end, function(code, signal)
+    self:_fail_pending_requests()
+    dispatchers.on_exit(code, signal)
+  end)
   return self
+end
+
+--- Fails every request still waiting for a reply: the server has exited and will not send
+--- one, so callers would otherwise wait forever.
+---@private
+function Client:_fail_pending_requests()
+  local ids = vim.tbl_keys(self.message_callbacks) --- @type integer[]
+  table.sort(ids)
+  for _, id in ipairs(ids) do
+    local notify_reply_callback = self.notify_reply_callbacks[id]
+    if notify_reply_callback then
+      notify_reply_callback(id)
+    end
+    self.message_callbacks[id](
+      { code = protocol.ErrorCodes.ServerExited, message = 'server exited' },
+      nil,
+      id
+    )
+  end
+  self.message_callbacks = {}
+  self.notify_reply_callbacks = {}
 end
 
 ---@private

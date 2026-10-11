@@ -58,7 +58,8 @@ end
 --- Command `string[]` that launches the language server (treated as in |jobstart()|, must be
 --- absolute or on `$PATH`, shell constructs like "~" are not expanded), or function that creates an
 --- RPC client (or an in-process |lsp-server|). Function receives a `dispatchers` table and the
---- resolved `config`, and must return an object in the form of |vim.lsp.rpc.Client|.
+--- resolved `config`, and must return an object in the form of |vim.lsp.rpc.Client|, including
+--- failing pending request callbacks with a `ServerExited` error when the server exits.
 ---
 --- Example (list):
 --- ```lua

@@ -1315,6 +1315,42 @@ describe('LSP', function()
       }
     end)
 
+    it('fails pending requests when the server exits', function()
+      test_rpc_server {
+        test_name = 'exit_with_pending_request',
+        on_init = function()
+          command('let g:requests = 0')
+          command('autocmd LspRequest * let g:requests+=1')
+          exec_lua(function()
+            _G.TEST_RPC_CLIENT:request('slow_request', nil, function(err, result, ctx)
+              _G.pending_reply = { err = err, result = result, request_id = ctx.request_id }
+            end)
+          end)
+          eq(1, eval('g:requests'))
+        end,
+        on_exit = function(code, signal)
+          eq(0, code, 'exit code')
+          eq(0, signal, 'exit signal')
+          eq(
+            { err = { code = -32900, message = 'server exited' }, request_id = 2 },
+            exec_lua(function()
+              assert(vim.wait(1000, function()
+                return _G.pending_reply ~= nil
+              end))
+              return _G.pending_reply
+            end)
+          )
+          eq(2, eval('g:requests'))
+          eq(
+            nil,
+            exec_lua(function()
+              return _G.TEST_RPC_CLIENT.requests[2]
+            end)
+          )
+        end,
+      }
+    end)
+
     it('request should not be pending for sync responses (in-process LS)', function()
       --- @type boolean
       local pending_request = exec_lua(function()

@@ -728,8 +728,12 @@ for k, fn in pairs(M) do
       --  message: string;
       --  data?: string | number | boolean | array | object | null;
 
-      -- Per LSP, don't show ContentModified error to the user.
-      if err.code ~= protocol.ErrorCodes.ContentModified then
+      -- Per LSP, don't show ContentModified error to the user. Nor ServerExited: the client
+      -- reports an unexpected exit once, not per pending request.
+      if
+        err.code ~= protocol.ErrorCodes.ContentModified
+        and err.code ~= protocol.ErrorCodes.ServerExited
+      then
         local client = vim.lsp.get_client_by_id(ctx.client_id)
         local client_name = client and client.name or string.format('client_id=%d', ctx.client_id)
 
