@@ -34,7 +34,8 @@ typedef enum CmdAtomType {
 typedef struct {
   bufref_T buf;       ///< Buffer.
   const win_T *win;   ///< Window.
-  pos_T pos;          ///< Cursor position. Stored here bc the window might be closed.
+  pos_T pos;          ///< Primary cursor position at the start (`win.w_cursor` moves after).
+  uint32_t mcursor;   ///< Mcursor overlapping primary at `pos` (mark id, 0: none). Not replayed.
   varnumber_T tick;   ///< b:changedtick.
   int maptick;        ///< Advances on typed input (globals.h:maptick).
 } CmdOrigin;
@@ -42,17 +43,17 @@ typedef struct {
 /// How an insert-session was entered from Visual mode.
 typedef enum {
   kVInsNone,    ///< Not entered from Visual mode.
-  kVInsKeys,    ///< Redo opens with the selection's captured keys: replayable.
-  kVInsMotion,  ///< Ex/Lua motion selected the region ("c" + Lua textobj): replayable.
-  kVInsOther,   ///< Redo without captured keys: forced or self-selecting motion (gn, gv), or "1v"
-                ///< fixed-size fallback.
+  kVInsKeys,    ///< (Replayable) Redo opens with the selection's captured keys.
+  kVInsMotion,  ///< (Replayable) Motion selected the region: Ex/Lua omap ("c" + Lua textobj), "gn".
+  kVInsOther,   ///< Redo without captured keys: forced motion, "gv", or "1v" fixed-size fallback.
 } VisualIns;
 
 /// The insert-session delimited by atom_ins_start()/atom_ins_end().
 typedef struct {
+  CmdOrigin origin;  ///< State at start.
   bool typed;        ///< Session is user input (typed, or via mapping/macro).
   VisualIns vis;     ///< Session was entered from Visual mode.
-  CmdOrigin origin;  ///< State at start.
+  char *vsel;        ///< Visual keys ("gv…"); supplants redo's "1v" in atom+cascade. Owned.
 } InsSession;
 
 typedef struct CmdAtom CmdAtom;
@@ -87,9 +88,8 @@ enum {
   kKeyPayload    = 1 << 2,  ///< Interactively-typed payload (/, ?, :, !).
   kKeyScrollMove = 1 << 3,  ///< Scroll may move cursor (C-D/…): viewport-dependent, unreplayable.
   kKeyScrollView = 1 << 4,  ///< Viewport-only scroll (C-Y,wheel): cursor stays, unless 'scrolloff'.
-  kKeyJump       = 1 << 5,  ///< Moves to absolute pos from primary cursor's shared nav state
-                            ///< (jumplist C-O/I, CTRL-T, "g;"): not followable.
-  kKeyMotion     = 1 << 6,  ///< Replayable special-key motion (arrows, <Home>, …).
+  kKeyJump       = 1 << 5,  ///< Absolute motion (multiplexed "gg", "g;", …), see NV_JUMP.
+  kKeyMotion     = 1 << 6,  ///< Cursor-relative motion (multiplexed, special keys), see NV_MOTION.
   kKeyInsFlush   = 1 << 7,  ///< Insert-mode cmd a literal preview cannot represent:
                             ///< - deletions/indent-shifts (<Del>, CTRL-W, …) may edit text
                             ///<   outside the tracked region by per-cursor amounts;

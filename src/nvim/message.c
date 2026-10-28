@@ -158,6 +158,9 @@ static bool msg_ext_append = false;  ///< message appended to previous message l
 
 static int msg_grid_pos_at_flush = 0;
 
+/// Set to true to avoid msg_use_printf, including for a delayed newline
+static bool msg_special_case_for_lua_print = false;
+
 static int64_t msg_id_next = 1;           ///< message id to be allocated to next message
 
 /// Returns true if the given integer message-id was previously generated.
@@ -353,7 +356,7 @@ static bool format_progress_message(HlMessage *hl_msg, MessageData *msg_data)
 /// @param err Whether to print message as an error
 /// @param msg_data Progress-message data
 MsgID msg_multihl(MsgID id, HlMessage hl_msg, const char *kind, bool history, bool err,
-                  MessageData *msg_data, bool *needs_msg_clear)
+                  MessageData *msg_data, bool *needs_msg_clear, bool raw_for_lua_print)
 {
   // Message `id`:
   // - Nil: Generate a new Integer id.
@@ -386,6 +389,19 @@ MsgID msg_multihl(MsgID id, HlMessage hl_msg, const char *kind, bool history, bo
   if (kind != NULL) {
     msg_ext_set_kind(kind);
   }
+  if (raw_for_lua_print) {
+    // TODO(bfredl): message code is mess. AFTER we go ui2-only I am going to
+    // refactor the higher layer around it so this special case is no longer special
+    // (it should just be possible to have a message be a bunch of valid bytes
+    // which are not needed to be "distorted" by the message.c layer at all)
+    // but I am not going to change the function signature for msg_puts_len
+    // and msg_outtrans_len and all their frens before then.
+    msg_special_case_for_lua_print = true;
+    assert(kv_size(hl_msg) == 1);
+    HlMessageChunk chunk = kv_A(hl_msg, 0);
+    printf("%.*s\n", (int)chunk.text.size, chunk.text.data);
+  }
+
   msg_ext_skip_flush = true;
   msg_ext_id = id;
 
@@ -1095,16 +1111,30 @@ char *msg_may_trunc(bool force, char *s)
 /// Shows a progress-message.  A non-"running" `status` ends the message and announces the
 /// progress task as "done".
 ///
-/// @param s    Message text.  NULL ends the message without showing anything.
-/// @param err  Show as an error message.
-char *msg_progress(char *s, char *id, char *status, int hl_id, bool hist, bool trunc, bool err)
+/// @param s        Message text.  NULL ends the message without showing anything.
+/// @param percent  Progress percentage, or -1 if unknown.
+/// @param err      Show as an error message.
+char *msg_progress(char *s, char *id, char *status, int percent, int hl_id, bool hist, bool trunc,
+                   bool err)
 {
-  bool clear = false;
   MessageData data = {
     .source = cstr_as_string("nvim"),
     .status = cstr_as_string(status),
-    .percent = -1,
+    .percent = percent,
   };
+  return msg_with_id(s, id, "progress", &data, hl_id, hist, trunc, err);
+}
+
+/// Shows message `s` with `id`: replaces the message with the same `id`, if any.
+///
+/// @param s     Message text.  NULL ends a progress-message without showing anything.
+/// @param kind  Message kind, e.g. "progress".
+/// @param data  Progress-message data, or NULL.
+/// @param err   Show as an error message.
+char *msg_with_id(char *s, char *id, const char *kind, MessageData *data, int hl_id, bool hist,
+                  bool trunc, bool err)
+{
+  bool clear = false;
   HlMessage chunks = KV_INITIAL_VALUE;
   if (s != NULL) {
     if (hist && (!trunc || ui_has(kUIMessages))) {
@@ -1116,7 +1146,7 @@ char *msg_progress(char *s, char *id, char *status, int hl_id, bool hist, bool t
     kv_push(chunks, ((HlMessageChunk){ cstr_as_string(s), hl_id }));
   }
   msg_ext_no_fast();
-  msg_multihl(CSTR_AS_OBJ(id), chunks, "progress", false, err, &data, &clear);
+  msg_multihl(CSTR_AS_OBJ(id), chunks, kind, false, err, data, &clear, false);
   kv_destroy(chunks);
   ui_flush();
   return s;
@@ -1270,26 +1300,33 @@ void msg_hist_clear_temp(void)
   }
 }
 
-int messagesopt_changed(void)
+/// Check the 'messagesopt' fields after schema validation.
+const char *validate_messagesopt(optset_T *args)
 {
-  OptKeyDict_mopt *v = opt_keyset(p_mopt, kOptMessagesopt, NULL);
+  OptKeyDict_mopt *v = opt_keyset(args->os_newval.data.string.data, kOptMessagesopt, NULL);
 
   // Either "wait" or "hit-enter" is required; "history" always.
   if ((!v->hit_enter && !HAS_KEY(v, mopt, wait)) || !HAS_KEY(v, mopt, history)) {
-    return FAIL;
+    return e_invarg;
   }
   // "history" and "wait" must be <= 10000; "maxheight" is a percentage.
   if (v->history > 10000 || v->wait > 10000 || v->maxheight > 100) {
-    return FAIL;
+    return e_invarg;
   }
+  return NULL;
+}
+
+/// Process the updated 'messagesopt' option value.
+const char *did_set_messagesopt(optset_T *args FUNC_ATTR_UNUSED)
+{
+  OptKeyDict_mopt *v = opt_keyset(p_mopt, kOptMessagesopt, NULL);
 
   msg_hit_enter = v->hit_enter;
   msg_wait = (int)v->wait;
   progress_msg_target = strequal(v->progress, "c") ? PROGRESS_TARGET_CMD : 0;
   msg_hist_max = (int)v->history;
   msg_hist_clear(msg_hist_max);
-
-  return OK;
+  return NULL;
 }
 
 /// :messages command implementation
@@ -1333,7 +1370,7 @@ void ex_messages(exarg_T *eap)
     if (redirecting() || !ui_has(kUIMessages)) {
       msg_silent += ui_has(kUIMessages);
       bool needs_clear = false;
-      msg_multihl(NIL, p->msg, p->kind, false, false, NULL, &needs_clear);
+      msg_multihl(NIL, p->msg, p->kind, false, false, NULL, &needs_clear, false);
       msg_silent -= ui_has(kUIMessages);
     }
   }
@@ -1381,7 +1418,7 @@ void wait_return(int redraw)
     return;
   }
 
-  if (headless_mode && !ui_active()) {
+  if ((headless_mode && !ui_active()) || input_unanswerable()) {
     return;
   }
 
@@ -1716,7 +1753,7 @@ void msg_start(void)
     msg_row = cmdline_row;
     msg_col = 0;
   } else if ((msg_didout || p_ch == 0) && !ui_has(kUIMessages)) {  // start message on next line
-    if (p_ch == 0 && !msg_didout && msg_use_printf()) {
+    if (((p_ch == 0 && !msg_didout) || msg_special_case_for_lua_print) && msg_use_printf()) {
       msg_puts_display("\n", 1, 0, false);
     } else {
       msg_putchar('\n');
@@ -1724,6 +1761,7 @@ void msg_start(void)
     did_return = true;
     cmdline_row = msg_row;
   }
+  msg_special_case_for_lua_print = false;
   if (!msg_didany || lines_left < 0) {
     msg_starthere();
   }
@@ -2385,7 +2423,7 @@ void msg_puts_len(const char *const str, const ptrdiff_t len, int hl_id, bool hi
   // window, cursor positioning may not work correctly (window size may be
   // different, e.g. for Win32 console) or we just don't know where the
   // cursor is.
-  if (msg_use_printf()) {
+  if (msg_use_printf() && !msg_special_case_for_lua_print) {
     int saved_msg_col = msg_col;
     msg_puts_printf(str, len);
     if (headless_mode) {
@@ -2440,9 +2478,8 @@ static void msg_puts_display(const char *str, int maxlen, int hl_id, int recurse
 
     // Find last newline in the message and calculate the current message column
     const char *lastline = xmemrchr(str, '\n', len);
-    maxlen -= (int)(lastline ? (lastline - str) : 0);
     const char *p = lastline ? lastline + 1 : str;
-    int col = (int)(maxlen < 0 ? mb_string2cells(p) : mb_string2cells_len(p, (size_t)maxlen));
+    int col = (int)mb_string2cells_len(p, len - (size_t)(p - str));
     msg_col = (lastline ? 0 : msg_col) + col;
 
     return;
@@ -3028,10 +3065,8 @@ static bool do_more_prompt(int typed_char)
   msgchunk_T *mp_last = NULL;
   msgchunk_T *mp;
 
-  // If headless mode is enabled and no input is required, this variable
-  // will be true. However If server mode is enabled, the message "--more--"
-  // should be displayed.
-  bool no_need_more = headless_mode && !embedded_mode && !ui_active();
+  // Skip more-prompt if no one can answer it: --headless without --embed/UI, or input_unanswerable.
+  bool no_need_more = (headless_mode && !embedded_mode && !ui_active()) || input_unanswerable();
 
   // We get called recursively when a timer callback outputs a message. In
   // that case don't show another prompt. Also when at the hit-Enter prompt

@@ -86,6 +86,7 @@
 #include "nvim/mapping_defs.h"
 #include "nvim/mbyte.h"
 #include "nvim/mbyte_defs.h"
+#include "nvim/mcursor.h"
 #include "nvim/memline.h"
 #include "nvim/memory.h"
 #include "nvim/memory_defs.h"
@@ -141,8 +142,8 @@ static kvec_withinit_t(char, MAXMAPLEN + 1) on_key_buf = KVI_INITIAL_VALUE(on_ke
 
 /// Number of following bytes that should not be stored for vim.on_key().
 static size_t on_key_ignore_len = 0;
-/// Nesting depth of getchar()/getcharstr(). Will skip vim.on_key() callbacks. #40010
-static int getchar_depth = 0;
+/// Nesting depth of block_on_key(). Will skip vim.on_key() callbacks. #40010
+static int on_key_blocked = 0;
 
 static int typeahead_char = 0;  ///< typeahead char that's not flushed
 
@@ -492,6 +493,11 @@ void flush_buffers(flush_buffers_T flush_typeahead)
     atom_composite_abort();
   }
 
+  if (readbuf2.keys.size > 0 && Visual.active) {
+    // This flush discards the dot-repeat keys, including the operator that would end the selection.
+    // End Visual mode at cmd end, not here (else its autocmds would run inside emsg/vgetorpeek).
+    Visual.need_end = true;
+  }
   free_buff(&readbuf1);
   free_buff(&readbuf2);
 
@@ -531,13 +537,28 @@ void flush_buffers(flush_buffers_T flush_typeahead)
   }
 }
 
+/// Hides keys from vim.on_key() callbacks: keys that are not editor input, e.g. read by getchar()
+/// #40010 or executed internally (multicursor dry-run). Can be nested.
+void block_on_key(void)
+{
+  on_key_blocked++;
+}
+
+void unblock_on_key(void)
+{
+  on_key_blocked--;
+}
+
 /// flush map and typeahead buffers and give a warning for an error
 void beep_flush(void)
 {
-  if (emsg_silent == 0) {
+  // Don't flush during mc-replay. A failed motion ("vt;" where there is no ";") should not eat
+  // the keys typed after it ("c"). This matches Helix multiselection: each action during a Visual
+  // selection proceeds or fails, without canceling the next action.
+  if (emsg_silent == 0 && !mc_replaying()) {
     flush_buffers(FLUSH_MINIMAL);
-    vim_beep(kOptBoFlagError);
   }
+  vim_beep(kOptBoFlagError);
 }
 
 /// Starts capturing a new change: stores `spec`, caller appends the body (redo_append_x). The
@@ -1821,7 +1842,7 @@ int vgetc(void)
 
   // Execute Lua on_key callbacks.
   kvi_push(on_key_buf, NUL);
-  if (getchar_depth == 0 && nlua_exec_on_key(c, on_key_buf.items)) {
+  if (on_key_blocked == 0 && nlua_exec_on_key(c, on_key_buf.items)) {
     // Keys following K_COMMAND/K_LUA/K_PASTE_START aren't normally received by
     // vim.on_key() callbacks, so discard them along with the current key.
     if (c == K_COMMAND) {
@@ -1958,7 +1979,7 @@ static void getchar_common(typval_T *argvars, typval_T *rettv, bool allow_number
 
   no_mapping++;
   allow_keys++;
-  getchar_depth++;
+  block_on_key();
   if (!simplify) {
     no_reduce_keys++;
   }
@@ -2005,7 +2026,7 @@ static void getchar_common(typval_T *argvars, typval_T *rettv, bool allow_number
   atom_payload_end();
   no_mapping--;
   allow_keys--;
-  getchar_depth--;
+  unblock_on_key();
   if (!simplify) {
     no_reduce_keys--;
   }
@@ -2879,8 +2900,9 @@ static int vgetorpeek(bool advance)
                   if (!ascii_iswhite(ci.chr.value)) {
                     curwin->w_wcol = vcol;
                   }
-                  vcol += win_charsize(cstype, vcol, ci.ptr, ci.chr.value, &csarg).width;
-                  ci = utfc_next(ci);
+                  ClusterInfo cli = utf_ClusterInfo(ci);
+                  vcol += win_charsize(cstype, vcol, ci.ptr, ci.chr.value, &csarg, cli.cells).width;
+                  ci = cli.next;
                 }
 
                 curwin->w_wrow = curwin->w_cline_row

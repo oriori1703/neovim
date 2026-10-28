@@ -226,6 +226,8 @@ bool buf_ensure_loaded(buf_T *buf)
     return true;
   }
 
+  bufref_T bufref;
+  set_bufref(&bufref, buf);
   CtxSwitch aco = { 0 };
 
   // Make sure the buffer is in a window.
@@ -233,7 +235,8 @@ bool buf_ensure_loaded(buf_T *buf)
   // status can be OK or NOTDONE (which also means ok/done)
   int status = open_buffer(false, NULL, 0);
   ctx_restore(&aco);
-  return (status != FAIL);
+  // Autocommands may have wiped out or unloaded the buffer.
+  return status != FAIL && bufref_valid(&bufref) && buf->b_ml.ml_mfp != NULL;
 }
 
 /// Open current buffer, that is: open the memfile and read the file into
@@ -374,7 +377,7 @@ int open_buffer(bool read_stdin, exarg_T *eap, int flags_arg)
 
   // if first time loading this buffer, init b_chartab[]
   if (curbuf->b_flags & BF_NEVERLOADED) {
-    buf_init_chartab(curbuf, false);
+    buf_init_isk_chartab(curbuf);
     parse_cino(curbuf);
   }
 

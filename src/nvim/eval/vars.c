@@ -221,6 +221,7 @@ static struct vimvar {
   VV(VV_EXITREASON,       "exitreason",       VAR_STRING, VV_RO),
   VV(VV_USERACTIVE,       "useractive",       VAR_NUMBER, VV_RO),
   VV(VV_STARTREASON,      "startreason",      VAR_STRING, VV_RO),
+  VV(VV_CASCADING,        "cascading",        VAR_BOOL,   VV_RO),
 };
 #undef VV
 
@@ -3327,7 +3328,7 @@ static void set_option_from_tv(const char *varname, typval_T *varp)
 
   if (!error) {
     const CharBuf errbuf = { (char[IOSIZE]){ 0 }, IOSIZE };
-    const char *errmsg = set_option_value(opt_idx, value, OPT_LOCAL, &errbuf);
+    const char *errmsg = set_option_value(opt_idx, value, OPT_LOCAL, true, &errbuf);
 
     if (errmsg) {
       emsg(errmsg);

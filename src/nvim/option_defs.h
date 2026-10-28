@@ -29,11 +29,11 @@ typedef enum {
   kOptFlagOneComma  = (1 << 11) | kOptFlagComma,  ///< Comma-separated list that cannot have two consecutive commas.
   kOptFlagNoDup     = 1 << 12,  ///< Don't allow duplicate strings.
   kOptFlagFlagList  = 1 << 13,  ///< List of single-char flags.
-  kOptFlagSecure    = 1 << 14,  ///< Cannot change in modeline or secure mode.
+  kOptFlagSecure    = 1 << 14,  ///< Cannot change in modelines, secure mode, or the sandbox.
   kOptFlagGettext   = 1 << 15,  ///< Expand default value with _().
   kOptFlagNoGlob    = 1 << 16,  ///< Do not use local value for global vimrc.
   kOptFlagNFname    = 1 << 17,  ///< Only normal file name chars allowed.
-  kOptFlagInsecure  = 1 << 18,  ///< Option was set from a modeline.
+  kOptFlagInsecure  = 1 << 18,  ///< Value contains untrusted content; evaluate it in the sandbox.
   kOptFlagPriMkrc   = 1 << 19,  ///< Priority for :mkvimrc (setting option has side effects).
   kOptFlagCurswant  = 1 << 20,  ///< Update curswant required; not needed when there is a redraw flag.
   kOptFlagNDname    = 1 << 21,  ///< Only normal directory name chars allowed.
@@ -101,6 +101,16 @@ typedef struct {
   /// New value of the option (not yet stored during validation).
   Object os_newval;
 
+  /// Initially empty; validation may prepare data for the did_set callback.
+  /// The callbacks agree on the union member and pointer type. A callback taking
+  /// ownership of a pointer must clear it.
+  union {
+    void *ptr;
+    unsigned flags;
+  } os_prep;
+  /// Frees non-NULL prepared data after a dry run, an error, or application.
+  void (*os_prep_free)(void *);
+
   /// Option value was checked to be safe, no need to set kOptFlagInsecure
   /// Used for the 'keymap', 'filetype' and 'syntax' options.
   bool os_value_checked;
@@ -117,13 +127,14 @@ typedef struct {
   /// message (when it is not NULL).
   const CharBuf *os_errbuf;
 
-  void *os_win;
-  void *os_buf;
+  win_T *os_win;
+  buf_T *os_buf;
 } optset_T;
 
 /// Check a candidate value without changing option variables or derived state,
 /// or evaluating user code. Return an error message, or NULL on success.
-typedef const char *(*opt_validate_cb_T)(const optset_T *args);
+/// May populate os_prep for the did_set callback.
+typedef const char *(*opt_validate_cb_T)(optset_T *args);
 
 /// Type for the callback function invoked after storing an option value to
 /// apply it and update derived state.

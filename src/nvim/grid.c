@@ -182,24 +182,6 @@ size_t schar_len(schar_T sc)
   }
 }
 
-int schar_cells(schar_T sc)
-{
-  // hot path
-#ifdef ORDER_BIG_ENDIAN
-  if (!(sc & 0x80FFFFFF)) {
-    return 1;
-  }
-#else
-  if (sc < 0x80) {
-    return 1;
-  }
-#endif
-
-  char sc_buf[MAX_SCHAR_SIZE];
-  schar_get(sc_buf, sc);
-  return utf_ptr2cells(sc_buf);
-}
-
 /// gets first raw UTF-8 byte of an schar
 static char schar_get_first_byte(schar_T sc)
 {
@@ -438,32 +420,24 @@ void grid_line_put_schar(int col, schar_T schar, int attr)
 /// @return number of grid cells used
 int grid_line_puts(int col, const char *text, int textlen, int attr)
 {
-  const char *ptr = text;
-  int len = textlen;
-
   assert(grid_line_grid);
+  int len = textlen >= 0 ? textlen : INT_MAX;
 
   int start_col = col;
 
   const int max_col = grid_line_maxcol;
-  while (col < max_col && (len < 0 || (int)(ptr - text) < len) && *ptr != NUL) {
+  StrCharInfo ci = utf_ptr2StrCharInfo_len(text, len);
+  while (col < max_col && len > 0 && *ci.ptr != NUL) {
+    ClusterInfo cli = utf_ClusterInfo_len(ci, &len);
     // check if this is the first byte of a multibyte
-    int mbyte_blen;
-    if (len >= 0) {
-      int maxlen = (int)((text + len) - ptr);
-      mbyte_blen = utfc_ptr2len_len(ptr, maxlen);
-      if (mbyte_blen > maxlen) {
-        mbyte_blen = 1;
-      }
-    } else {
-      mbyte_blen = utfc_ptr2len(ptr);
-    }
-    int firstc;
-    schar_T schar = utfc_ptrlen2schar(ptr, mbyte_blen, &firstc);
-    int mbyte_cells = utf_ptr2cells_len(ptr, mbyte_blen);
-    if (mbyte_cells > 2 || schar == 0) {
+    schar_T schar;
+    int mbyte_cells = cli.cells;
+    if (mbyte_cells > 2 || ci.chr.value < 0x20) {
+      // caller should have translated invalid bytes but barg out safely
       mbyte_cells = 1;
       schar = schar_from_char(0xFFFD);
+    } else {
+      schar = schar_from_cluster(ci, cli);
     }
 
     if (col + mbyte_cells > max_col) {
@@ -475,7 +449,7 @@ int grid_line_puts(int col, const char *text, int textlen, int attr)
 
     // When at the start of the text and overwriting the right half of a
     // two-cell character in the same grid, truncate that into a '>'.
-    if (ptr == text && col > grid_line_first && col < grid_line_last
+    if (ci.ptr == text && col > grid_line_first && col < grid_line_last
         && linebuf_char[col] == 0) {
       linebuf_char[col - 1] = schar_from_ascii('>');
     }
@@ -490,7 +464,7 @@ int grid_line_puts(int col, const char *text, int textlen, int attr)
     }
 
     col += mbyte_cells;
-    ptr += mbyte_blen;
+    ci = cli.next;
   }
 
   if (col > start_col) {
@@ -1252,4 +1226,34 @@ schar_T schar_from_char(int c)
   }
   utf_char2bytes(c, (char *)&sc);
   return sc;
+}
+
+schar_T schar_from_cluster_impl(const char *buf, size_t len, bool first_compose)
+{
+  // A final NUL must fit in MAX_SCHAR_SIZE. An extra space if this would compose
+  // with the previous cell
+  size_t maxlen = MAX_SCHAR_SIZE - 1 - (first_compose ? 1 : 0);
+  if (len > maxlen) {
+    len = maxlen;
+    while ((buf[len] & 0xC0) != 0xC0) {  // find start byte
+      len--;
+    }
+  }
+
+  if (first_compose) {
+    char cbuf[MAX_SCHAR_SIZE];
+    cbuf[0] = ' ';
+    memcpy(cbuf + 1, buf, len);
+    return schar_from_buf(cbuf, len + 1);
+  } else {
+    return schar_from_buf(buf, len);
+  }
+}
+
+schar_T unittest_schar_from_cluster(const char *buf, int *firstc)
+{
+  StrCharInfo ci = utf_ptr2StrCharInfo(buf);
+  ClusterInfo cli = utf_ClusterInfo(ci);
+  *firstc = ci.chr.value;
+  return ci.chr.value >= 0 ? schar_from_cluster(ci, cli) : 0;
 }

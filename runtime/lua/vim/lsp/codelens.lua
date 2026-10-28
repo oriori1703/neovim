@@ -1,5 +1,7 @@
 local api = vim.api
 local log = require('vim.lsp.log')
+local collect_ordered = require('vim._core.util').collect_ordered
+local do_or_select = require('vim._core.util').do_or_select
 local tableclear = require('vim._core.table').clear
 local util = require('vim.lsp.util')
 
@@ -20,7 +22,7 @@ local Capability = require('vim.lsp._capability')
 ---@field active table<integer, vim.lsp.codelens.Provider>
 ---
 --- Index In the form of client_id -> client_state
----@field client_state? table<integer, vim.lsp.codelens.ClientState?>
+---@field client_state table<integer, vim.lsp.codelens.ClientState?>
 local Provider = {
   name = 'codelens',
   method = 'textDocument/codeLens',
@@ -190,7 +192,8 @@ function Provider:on_win(toprow, botrow)
           end)
 
           local client = assert(vim.lsp.get_client_by_id(client_id))
-          local range = vim.range.lsp(bufnr, row_lenses.lenses[1].range, client.offset_encoding)
+          local range =
+            vim.range.lsp(bufnr, assert(row_lenses.lenses[1]).range, client.offset_encoding)
           ---@type [string, string][]
           local virt_text = {
             { string.rep(' ', range.start_col), 'LspCodeLensSeparator' },
@@ -307,7 +310,7 @@ function M.get(filter)
       'vim.lsp.codelens.get({ bufnr = bufnr })',
       '0.13.0'
     )
-    local bufnr = vim._resolve_bufnr(filter)
+    local bufnr = vim._resolve_bufnr(filter --[[@as integer]])
     local provider = Provider.active[bufnr]
     if not provider then
       return {}
@@ -353,55 +356,53 @@ local function on_lenses_run(lnum, opts, results, context)
   local bufnr = context.bufnr or 0
 
   ---@type {client: vim.lsp.Client, lens: lsp.CodeLens}[]
-  local candidates = {}
-  local pending_resolve = 1
-  local function on_resolved()
-    pending_resolve = pending_resolve - 1
-    if pending_resolve > 0 then
-      return
-    end
-    if #candidates == 0 then
-      vim.notify('No codelens at current line')
-    elseif #candidates == 1 then
-      local candidate = candidates[1]
-      candidate.client:exec_cmd(candidate.lens.command, { bufnr = bufnr })
-    else
-      local selectopts = {
-        prompt = 'Code lenses: ',
-        kind = 'codelens',
-        ---@param candidate {client: vim.lsp.Client, lens: lsp.CodeLens}
-        format_item = function(candidate)
-          return string.format('%s [%s]', candidate.lens.command.title, candidate.client.name)
-        end,
-      }
-      vim.ui.select(candidates, selectopts, function(candidate)
-        if candidate then
-          candidate.client:exec_cmd(candidate.lens.command, { bufnr = bufnr })
-        end
-      end)
-    end
-  end
+  local line_lenses = {}
   for client_id, result in pairs(results) do
     if opts.client_id == nil or opts.client_id == client_id then
       local client = assert(vim.lsp.get_client_by_id(client_id))
       for _, lens in ipairs(result.result or {}) do
         if lens.range.start.line == lnum then
-          if lens.command then
-            table.insert(candidates, { client = client, lens = lens })
-          else
-            pending_resolve = pending_resolve + 1
-            client:request('codeLens/resolve', lens, function(_, resolved_lens)
-              if resolved_lens then
-                table.insert(candidates, { client = client, lens = resolved_lens })
-              end
-              on_resolved()
-            end, bufnr)
-          end
+          line_lenses[#line_lenses + 1] = { client = client, lens = lens }
         end
       end
     end
   end
-  on_resolved()
+
+  ---@param candidates {client: vim.lsp.Client, command: lsp.Command}[]
+  local report = collect_ordered(#line_lenses, function(candidates)
+    if #candidates == 0 then
+      vim.notify('No codelens at current line')
+      return
+    end
+    do_or_select(candidates, {
+      prompt = 'Code lenses: ',
+      kind = 'codelens',
+      ---@param candidate {client: vim.lsp.Client, command: lsp.Command}
+      format_item = function(candidate)
+        return string.format('%s [%s]', candidate.command.title, candidate.client.name)
+      end,
+    }, function(candidate)
+      if candidate then
+        candidate.client:exec_cmd(candidate.command, { bufnr = bufnr })
+      end
+    end)
+  end)
+
+  -- Resolve the lenses lacking a command all at once, keeping them in lens order.
+  for i, item in ipairs(line_lenses) do
+    local client, lens = item.client, item.lens
+    if lens.command then
+      report(i, { client = client, command = lens.command })
+    else
+      local sent = client:request('codeLens/resolve', lens, function(_, resolved)
+        local command = resolved and resolved.command
+        report(i, command and { client = client, command = command } or nil)
+      end, bufnr)
+      if not sent then
+        report(i, nil)
+      end
+    end
+  end
 end
 
 --- Optional parameters |kwargs|:
@@ -433,6 +434,7 @@ end
 --- |lsp-handler| for the method `workspace/codeLens/refresh`
 ---
 ---@internal
+---@diagnostic disable-next-line: annotation-usage-error
 ---@type lsp.Handler
 function M.on_refresh(err, _, ctx)
   if err then

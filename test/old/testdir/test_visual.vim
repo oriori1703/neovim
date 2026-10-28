@@ -949,6 +949,47 @@ func Test_visual_force_motion_feedkeys()
     ounmap i-
 endfunc
 
+" Test that a one-column block of a forced blockwise motion is not empty
+func Test_visual_force_motion_one_column_block()
+  new
+  " An exclusive motion: the block has one column, as in Visual block mode.
+  for [line, keys, expected] in [
+        \ ['ab', "0mxd\<C-V>`x", 'b'],
+        \ ['ab', "0mxc\<C-V>`xX\<Esc>", 'Xb'],
+        \ ['ab', "0d\<C-V>0", 'b'],
+        \ ]
+    call setline(1, line)
+    exe 'normal! ' .. keys
+    call assert_equal(expected, getline(1), keys)
+  endfor
+
+  " Visual block mode, for comparison.
+  call setline(1, 'ab')
+  exe "normal! 0\<C-V>d"
+  call assert_equal('b', getline(1))
+
+  set selection=exclusive
+  call setline(1, 'abcd')
+  exe "normal! 0d\<C-V>l"
+  call assert_equal('bcd', getline(1))
+  set selection&
+
+  " With 'cpoptions' "E" the block is not an empty region.
+  set cpoptions+=E
+  call setline(1, 'ab')
+  call setreg('"', '')
+  exe "normal! 0mxy\<C-V>`x"
+  call assert_equal('a', @")
+  set cpoptions-=E
+
+  " A characterwise exclusive motion still makes an empty region.
+  call setline(1, 'ab')
+  normal! 0mxd`x
+  call assert_equal('ab', getline(1))
+
+  bwipe!
+endfunc
+
 " Test block-insert using cursor keys for movement
 func Test_visual_block_insert_cursor_keys()
   new
@@ -1628,6 +1669,42 @@ func Test_heap_buffer_overflow()
 
   %bwipe!
   set updatecount&
+endfunc
+
+func s:ScreenAttr(row, col)
+  redraw
+  return screenattr(a:row, a:col)
+endfunc
+
+func Test_charwise_visual_hl_inclusive_and_exclusive_selection()
+  new
+  call setline(1, '12345')
+
+  normal! V$
+  const visual_attr = s:ScreenAttr(1, 1)
+  let VisualCols = {-> range(1, strlen(getline(1)))->filter({_, c ->
+        \ s:ScreenAttr(1, c) == visual_attr})}
+
+  exe "normal! \<Esc>"
+  call assert_true(visual_attr != s:ScreenAttr(1, 1),
+        \ "sanity check: Visual displayed differently to Normal")
+
+  set selection=inclusive
+  normal! ggf2vf4
+  call assert_equal([2, 3, 4], VisualCols())
+
+  set selection=exclusive
+  exe "normal! \<Esc>ggf2vll"
+  call assert_equal([2, 3], VisualCols())  " (Character under cursor excluded.)
+  normal! o
+  call assert_equal(2, col('.'), "sanity check: cursor column after 'o'")
+  call assert_equal([2, 3], VisualCols())
+  normal! y
+  call assert_equal('23', @",
+        \ "sanity check: yanked text matches visual selection")
+
+  set selection&
+  bwipe!
 endfunc
 
 " Test Visual highlight with cursor at end of screen line and 'showbreak'
@@ -2739,9 +2816,9 @@ endfunc
 func Test_getregion_invalid_buf()
   new
   help index
-  call cursor(7, 6)
+  call cursor(9, 6)
   norm! mA
-  call cursor(7, 18)
+  call cursor(9, 18)
   norm! mB
   call assert_equal(['file contains'], getregion(getpos("'A"), getpos("'B")))
   " close the help window
@@ -3108,6 +3185,28 @@ func Test_visual_ended_in_unloaded_buffer()
   unlet! s:fired
   set clipboard&
   %bw!
+endfunc
+
+" Check that visual selection is updated properly with the last line of the
+" window partially visible.
+func Test_visual_update_lastline()
+  CheckScreendump
+
+  let lines =<< trim END
+    call setline(1, ['aaa', 'bbb', 'ccc', repeat('d', 500), 'eee'])
+    split
+  END
+  call writefile(lines, 'XTest_visual_update_lastline', 'D')
+
+  let buf = RunVimInTerminal('-S XTest_visual_update_lastline', {'rows': 15, 'cols': 50})
+  call VerifyScreenDump(buf, 'Test_visual_update_lastline_1', {})
+  call term_sendkeys(buf, 'vipo')
+  call VerifyScreenDump(buf, 'Test_visual_update_lastline_2', {})
+  call term_sendkeys(buf, "\<Esc>")
+  call term_wait(buf, 100)
+  call VerifyScreenDump(buf, 'Test_visual_update_lastline_1', {})
+
+  call StopVimInTerminal(buf)
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

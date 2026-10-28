@@ -70,7 +70,7 @@ static handle_T _ctx_saved_curwin = 0;
 /// Whether an explicit :cd/:tcd/:lcd/:bcd/chdir() happened since the innermost ctx_switch().
 static bool _ctx_did_chdir = false;
 
-/// Namespace for the extmarks tracking a Context's kCtxMarks positions.
+/// Namespace for the extmarks tracking a Context's kCtxVisual/kCtxMarks positions.
 static uint32_t ctx_marks_ns(void)
 {
   static uint32_t ns = 0;
@@ -80,14 +80,17 @@ static uint32_t ctx_marks_ns(void)
   return ns;
 }
 
-/// The kCtxMarks positions of `ctx`, in `Context.pos_marks` order.
-static void ctx_positions(Context *ctx, pos_T *pos[5])
+/// kCtxVisual/kCtxMarks positions of `ctx`, in `Context.pos_marks` order. NULL: not in `flags`.
+static void ctx_positions(Context *ctx, CtxStateFlags flags, pos_T *pos[6])
 {
-  pos[0] = &ctx->visual.vi_start;
-  pos[1] = &ctx->visual.vi_end;
-  pos[2] = &ctx->op_start;
-  pos[3] = &ctx->op_end;
-  pos[4] = &ctx->last_change.mark;
+  const bool visual = flags & kCtxVisual;
+  const bool marks = flags & kCtxMarks;
+  pos[0] = visual ? &ctx->visual.vi_start : NULL;
+  pos[1] = visual ? &ctx->visual.vi_end : NULL;
+  pos[2] = marks ? &ctx->op_start : NULL;
+  pos[3] = marks ? &ctx->op_end : NULL;
+  pos[4] = marks ? &ctx->last_change.mark : NULL;
+  pos[5] = marks ? &ctx->last_insert.mark : NULL;
 }
 
 /// Frees a Context's resources and resets it via CONTEXT_INIT (thus the Context can be "reused").
@@ -130,16 +133,24 @@ void ctx_save(Context *ctx, const CtxStateFlags flags)
     ctx->curswant = curwin->w_set_curswant ? -1 : curwin->w_curswant;
   }
 
-  if (flags & kCtxMarks) {
+  if (flags & kCtxVisual) {
     ctx->visual = curbuf->b_visual;
     ctx->visual_mode_eval = curbuf->b_visual_mode_eval;
+  }
+  if (flags & kCtxMarks) {
     ctx->op_start = curbuf->b_op_start;
     ctx->op_end = curbuf->b_op_end;
     ctx->last_change = curbuf->b_last_change;
+    ctx->last_insert = curbuf->b_last_insert;
+  }
+  if (flags & (kCtxVisual | kCtxMarks)) {
     // Track the positions by extmarks, so buffer edits before ctx_load() shift them.
-    pos_T *pos[5];
-    ctx_positions(ctx, pos);
-    for (size_t i = 0; i < ARRAY_SIZE(ctx->pos_marks); i++) {
+    pos_T *pos[6];
+    ctx_positions(ctx, flags, pos);
+    for (size_t i = 0; i < ARRAY_SIZE(pos); i++) {
+      if (pos[i] == NULL) {
+        continue;
+      }
       if (pos[i]->lnum == 0) {  // Unset mark: no extmark.
         if (ctx->pos_marks[i] != 0) {
           extmark_del_id(curbuf, ctx_marks_ns(), ctx->pos_marks[i]);
@@ -204,9 +215,10 @@ void ctx_save(Context *ctx, const CtxStateFlags flags)
 void ctx_load(Context *ctx, const CtxStateFlags flags, const CtxLoadFlags loadflags)
   FUNC_ATTR_NONNULL_ALL
 {
-  // TODO(jkeyes): restore window, mode?
+  // TODO(jkeyes): restore window (add a `win` param?), mode?
 
   if (flags & kCtxCursor) {
+    assert(handle_get_buffer(ctx->buf) == curbuf);
     curwin->w_cursor = ctx->pos;  // The caller clamps it (check_cursor()).
     // Unset curswant: derive from the position, like a new cursor.
     if (ctx->curswant >= 0) {
@@ -217,22 +229,27 @@ void ctx_load(Context *ctx, const CtxStateFlags flags, const CtxLoadFlags loadfl
     }
   }
 
-  if (flags & kCtxMarks) {
-    assert(handle_get_buffer(ctx->buf) == curbuf);
-    pos_T *pos[5];
-    ctx_positions(ctx, pos);
-    for (size_t i = 0; i < ARRAY_SIZE(ctx->pos_marks); i++) {
-      if (ctx->pos_marks[i] == 0) {
+  buf_T *buf = handle_get_buffer(ctx->buf);
+  if ((flags & (kCtxVisual | kCtxMarks)) && buf != NULL) {
+    pos_T *pos[6];
+    ctx_positions(ctx, flags, pos);
+    for (size_t i = 0; i < ARRAY_SIZE(pos); i++) {
+      if (pos[i] == NULL || ctx->pos_marks[i] == 0) {
         continue;
       }
       // Shifted by edits since ctx_save(); a deleted mark keeps the saved position.
-      extmark_get_pos(curbuf, ctx_marks_ns(), ctx->pos_marks[i], pos[i]);
+      extmark_get_pos(buf, ctx_marks_ns(), ctx->pos_marks[i], pos[i]);
     }
-    curbuf->b_visual = ctx->visual;
-    curbuf->b_visual_mode_eval = ctx->visual_mode_eval;
-    curbuf->b_op_start = ctx->op_start;
-    curbuf->b_op_end = ctx->op_end;
-    curbuf->b_last_change = ctx->last_change;
+    if (flags & kCtxVisual) {
+      buf->b_visual = ctx->visual;
+      buf->b_visual_mode_eval = ctx->visual_mode_eval;
+    }
+    if (flags & kCtxMarks) {
+      buf->b_op_start = ctx->op_start;
+      buf->b_op_end = ctx->op_end;
+      buf->b_last_change = ctx->last_change;
+      buf->b_last_insert = ctx->last_insert;
+    }
   }
 
   if (flags & kCtxRegs) {
@@ -372,7 +389,7 @@ static void ctx_localdirs_restore(CtxSwitch *cs, win_T *cwp, tabpage_T *tp, bool
   const bool did_chdir = _ctx_did_chdir;
   _ctx_did_chdir = persist && did_chdir;
 
-  win_T *dirs_win = win_find_by_handle(cs->cs_new_curwin);
+  win_T *dirs_win = handle_get_window(cs->cs_new_curwin);
   if (dirs_win != NULL) {
     xfree(dirs_win->w_localdir);
     dirs_win->w_localdir = cs->cs_w_localdir;
@@ -603,8 +620,8 @@ win_T *ctx_saved_curwin(void)
 ///
 /// - Passing `wp` makes that window the curwin (in tabpage `tp`, or NULL for current tabpage).
 ///   - (Legacy: switch_win(), switch_win_noblock(), win_execute_before().)
-/// - Passing `buf`, enters a window showing `buf` in the current tabpage, or prepares a temporary
-///   "autocmd window" for it (never switches tabpage).
+/// - Passing `buf`, stays in curwin if it shows `buf`, else enters a window showing `buf` in the
+///   current tabpage, or prepares a temporary "autocmd window" (never switches tabpage).
 ///   - (Legacy: aucmd_prepbuf().)
 /// - Passing neither: only CWD state is saved; flags must include `kCtxKeepDirs`.
 ///
@@ -632,8 +649,8 @@ bool ctx_switch(CtxSwitch *cs, win_T *wp, tabpage_T *tp, buf_T *buf, CtxSwitchFl
     wp = curwin;  // No target: "switch" to curwin, i.e. stay put.
   }
 
-  // Resolve the target window.  A buffer target prefers a window already showing it, in the current
-  // tabpage (minimizes side effects); else a ctx_win is prepared below (ctx_win_prep).
+  // Resolve the target window.  A buffer target prefers curwin, then a window already showing it in
+  // current tabpage (minimizes side effects); else a ctx_win is prepared below (ctx_win_prep).
   if (buf != NULL) {
     if (buf == curbuf) {  // be quick when buf is curbuf
       wp = curwin;
@@ -659,6 +676,7 @@ bool ctx_switch(CtxSwitch *cs, win_T *wp, tabpage_T *tp, buf_T *buf, CtxSwitchFl
 
   // Save the current state.
   cs->cs_curwin = curwin->handle;
+  cs->cs_curwin_xtab = !win_valid(curwin);
   cs->cs_prevwin = prevwin == NULL ? 0 : prevwin->handle;
   cs->cs_same_win = wp == curwin;
   if (bt_prompt(curbuf)) {
@@ -694,7 +712,7 @@ bool ctx_switch(CtxSwitch *cs, win_T *wp, tabpage_T *tp, buf_T *buf, CtxSwitchFl
       buf_copy_options(buf, BCO_ENTER | BCO_NOHELP);
       prevwin = curwin;
     }
-    assert(win_valid(wp));
+    assert(wp == curwin || win_valid(wp));  // curwin may be outside curtab.
   } else if (!win_valid(wp)) {
     return false;
   }
@@ -716,7 +734,8 @@ bool ctx_switch(CtxSwitch *cs, win_T *wp, tabpage_T *tp, buf_T *buf, CtxSwitchFl
 /// Restores curwin/curbuf and prevwin. If the saved window no longer exists, enters `fallback`.
 static void ctx_restore_curwin(CtxSwitch *cs, win_T *fallback)
 {
-  win_T *save_curwin = win_find_by_handle(cs->cs_curwin);
+  win_T *save_curwin = cs->cs_curwin_xtab ? handle_get_window(cs->cs_curwin)
+                                          : win_find_by_handle(cs->cs_curwin);
   if (save_curwin == NULL) {
     save_curwin = fallback;  // Hmm, original window disappeared.
   }

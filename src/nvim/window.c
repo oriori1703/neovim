@@ -1762,8 +1762,8 @@ bool tabpage_win_valid(const tabpage_T *tp, const win_T *win)
   return false;
 }
 
-// Find window "handle" in the current tab page.
-// Return NULL if not found.
+/// Finds window `handle` in the current tabpage, or NULL.
+/// Note: use handle_get_window() to search all tabpages.
 win_T *win_find_by_handle(handle_T handle)
   FUNC_ATTR_PURE FUNC_ATTR_WARN_UNUSED_RESULT
 {
@@ -3431,11 +3431,11 @@ win_T *winframe_remove(win_T *win, int *dirp, tabpage_T *tp, frame_T **unflat_al
 
   if (*dirp == 'v') {
     frame_new_height(altfr, altfr->fr_height + frp_close->fr_height,
-                     altfr == frp_close->fr_next, false, false);
+                     altfr == frp_close->fr_next, !frame_fixed_height(altfr), false);
   } else {
     assert(*dirp == 'h');
     frame_new_width(altfr, altfr->fr_width + frp_close->fr_width,
-                    altfr == frp_close->fr_next, false);
+                    altfr == frp_close->fr_next, !frame_fixed_height(altfr));
   }
 
   // If the altframe wasn't adjacent and left/above, resizing it will have
@@ -3795,7 +3795,7 @@ void frame_new_height(frame_T *topfrp, int height, bool topfirst, bool wfh, bool
     OptInt new_ch = MAX(min_set_ch, p_ch + topfrp->fr_height - height);
     if (new_ch != p_ch) {
       const OptInt save_ch = min_set_ch;
-      set_option_value(kOptCmdheight, INTEGER_OBJ(new_ch), 0, NULL);
+      set_option_value(kOptCmdheight, INTEGER_OBJ(new_ch), 0, true, NULL);
       min_set_ch = save_ch;
     }
     height = (int)MIN(ROWS_AVAIL, height);
@@ -4781,7 +4781,7 @@ static void enter_tabpage(tabpage_T *tp, buf_T *old_curbuf, bool trigger_enter_a
     OptInt new_ch = p_ch;
     p_ch = prev_p_ch;
     command_frame_height = false;
-    set_option_value(kOptCmdheight, INTEGER_OBJ(new_ch), 0, NULL);
+    set_option_value(kOptCmdheight, INTEGER_OBJ(new_ch), 0, true, NULL);
     command_frame_height = true;
   } else if (old_curtab != curtab) {
     tabpage_check_windows(old_curtab);
